@@ -80,6 +80,11 @@ SELF_TEST=1 python3 monitor.py
 # expect: your phone RINGS (Telegram call) + a Telegram message with dates+link,
 # and a printed total latency figure (typically < 10 s)
 
+# 3b. Full fire drill, no computer needed: repo Actions tab -> "drill" ->
+#     Run workflow. For up to 5 min it behaves exactly like a real opening:
+#     ring + [TEST] message every ~minute until you press the STOP button
+#     in the Telegram message (expect a "✅ Alerts stopped" confirmation).
+
 # 4. Cadence check while running: every check logs a timestamp + duration —
 #    see the live job log in the repo's Actions tab (cloud) or
 #    tail -f ~/Library/Logs/visa-monitor.log (local launchd)
@@ -124,9 +129,13 @@ Local alternative (lower block-risk, residential IP): fill `.env`, then
 - **Backoff trade-off:** after repeated errors the monitor deliberately slows
   to up to 30 min between tries. That's the design — staying unbanned beats
   hammering — but it means an opening during a backoff window can be missed.
-- **De-duplication:** you're alerted only when a date *not previously open*
-  appears (state in `state.json`), so a slot that stays open won't re-ring you
-  every minute. A date that closes and reopens does re-alert.
+- **Alarm behavior:** when an opening appears you're rung + messaged every
+  ~65 s (`ALARM_REPEAT_SECONDS`) until you press the 🛑 STOP button in the
+  Telegram message (or reply "stop" to the bot). After stopping, only a NEW
+  date (or a close-and-reopen) restarts the alarm. Pressing STOP can take up
+  to one check cycle (~1 min) to register — you may get one extra ring.
+  Acknowledgements don't survive the ~5.7 h job handoff, so a still-open slot
+  re-alerts once per handoff.
 - **Site changes:** if rsvsys changes markup or fixes their swapped alt texts,
   detection still works (icons/clickability, not text), but a structural
   redesign would need a parser tweak. If the monitor starts logging repeated
