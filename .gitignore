@@ -1,0 +1,4 @@
+.env
+state.json
+artifacts/
+__pycache__/
