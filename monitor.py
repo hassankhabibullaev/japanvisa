@@ -26,12 +26,20 @@ def log(msg):
 def load_config(path="config.json"):
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
-    key = cfg["target"]
-    if key not in cfg["targets"]:
-        raise SystemExit("config target '%s' is not one of: %s"
-                         % (key, ", ".join(cfg["targets"])))
-    cfg["_target"] = dict(cfg["targets"][key])
-    cfg["_target"]["key"] = key
+    watch = cfg.get("watch") or []
+    if not watch:
+        raise SystemExit("config 'watch' is empty - nothing would be monitored")
+    targets = []
+    for key in watch:
+        if key not in cfg["targets"]:
+            raise SystemExit("config watch entry '%s' is not one of: %s"
+                             % (key, ", ".join(cfg["targets"])))
+        t = dict(cfg["targets"][key])
+        t["key"] = key
+        targets.append(t)
+    cfg["_targets"] = targets
+    if not cfg.get("groups"):
+        raise SystemExit("config 'groups' is empty - no group size to look for")
     return cfg
 
 
@@ -89,9 +97,8 @@ class WrongCalendarAlert(Exception):
     pass
 
 
-def scan_once(cfg, s, notifier):
+def scan_once(cfg, s, notifier, tgt):
     """Return (openings, days_seen). Raises on a verified-wrong calendar."""
-    tgt = cfg["_target"]
     s.select(tgt["category"], tgt["event"], tgt.get("plan"))
 
     seen = 0
@@ -108,8 +115,9 @@ def scan_once(cfg, s, notifier):
 
     if unknown:
         notifier.notice(
-            "Calendar markup changed - the monitor saw day squares it does not "
-            "recognise and cannot judge:\n" + "\n".join(unknown[:8]) +
+            "Calendar markup changed on the %s calendar - the monitor saw day "
+            "squares it does not recognise and cannot judge:\n" % tgt["label"] +
+            "\n".join(unknown[:8]) +
             "\n\nStill running, but treat 'no slots' with suspicion until this is fixed.")
 
     openings = []
@@ -123,10 +131,15 @@ def scan_once(cfg, s, notifier):
     return openings, seen, open_dates
 
 
-def useful(opening, min_seats):
-    """A day is worth waking someone for only if a slot could hold the group."""
+def useful(opening, groups):
+    """Worth waking someone only if a slot could hold the smallest group.
+
+    A slot whose seat count the site did not state also counts: a slot we cannot
+    measure is never silently discarded.
+    """
+    need = min(groups)
     for sl in opening["slots"]:
-        if sl.seats is None or sl.seats >= min_seats:
+        if sl.seats is None or sl.seats >= need:
             return True
     return False
 
@@ -136,26 +149,38 @@ def opening_key(opening):
         "%s:%s" % (sl.time, "?" if sl.seats is None else sl.seats) for sl in opening["slots"])
 
 
-def describe(opening, cfg):
-    tgt = cfg["_target"]
-    lines = ["SLOT OPEN - %s" % tgt["label"], "", "Date: %s" % opening["date"], "Times:"]
+def describe(opening, cfg, tgt):
+    groups = sorted(cfg["groups"], reverse=True)
+    lines = ["%s SLOTS AVAILABLE" % tgt["headline"],
+             tgt["label"],
+             "",
+             "Date: %s" % opening["date"],
+             "Times:"]
     for sl in opening["slots"]:
         lines.append("  - " + sl.describe())
-    best = [sl.seats for sl in opening["slots"] if sl.seats is not None]
-    if best:
-        top = max(best)
-        lines.append("")
-        lines.append("Most seats in a single slot: %d" % top)
-        lines.append("Your group of %d %s" % (
-            cfg["group_size"],
-            "FITS in one booking." if top >= cfg["group_size"]
-            else "does NOT fit one slot - largest is %d." % top))
+
+    known = [sl.seats for sl in opening["slots"] if sl.seats is not None]
+    lines.append("")
+    if known:
+        top = max(known)
+        lines.append("Most seats in one slot: %d" % top)
+        for g in groups:
+            lines.append("  group of %d: %s" % (g, "FITS" if top >= g else "does not fit"))
+        if len(groups) > 1 and len(known) >= 2:
+            two = sorted(known, reverse=True)[:2]
+            total = sum(groups)
+            lines.append("  both groups (%d people): %s"
+                         % (total, "possible across two slots (%d + %d seats)" % (two[0], two[1])
+                            if two[0] >= groups[0] and two[1] >= groups[1]
+                            else "not from what is open here"))
     else:
-        lines.append("")
-        lines.append("The site did not state seat counts. Check manually - "
-                     "the monitor is not guessing.")
+        lines.append("The site did not state seat counts on this day.")
+        lines.append("Alerting anyway rather than guessing - check it yourself.")
+
     if opening.get("max_group"):
-        lines.append("Site allows up to %d applicants per booking." % opening["max_group"])
+        lines.append("")
+        lines.append("Site allows up to %d applicants in one booking."
+                     % opening["max_group"])
     lines.append("")
     lines.append("https://uzembassyryouji.rsvsys.jp/reservations/calendar")
     return "\n".join(lines)
@@ -166,7 +191,8 @@ def describe(opening, cfg):
 # --------------------------------------------------------------------------
 
 def run(cfg, notifier, state, deadline):
-    s = visasite.Site()
+    # One session per calendar, so switching between them can never leak state.
+    sessions = {t["key"]: visasite.Site() for t in cfg["_targets"]}
     last_success = time.time()
     stale_warned = False
     busy_lo, busy_hi = cfg["busy_hours_utc"]
@@ -178,68 +204,76 @@ def run(cfg, notifier, state, deadline):
 
         hour = time.gmtime(now).tm_hour
         interval = cfg["poll_seconds_busy"] if busy_lo <= hour < busy_hi else cfg["poll_seconds_quiet"]
+        trouble = False
 
-        try:
-            openings, seen, open_dates = scan_once(cfg, s, notifier)
-            state.data["checks"] += 1
-            last_success = time.time()
-            if stale_warned:
-                notifier.notice("Reading the calendar again normally.")
-                stale_warned = False
+        for tgt in cfg["_targets"]:
+            key = tgt["key"]
+            try:
+                openings, seen, open_dates = scan_once(cfg, sessions[key], notifier, tgt)
+                state.data["checks"] += 1
+                last_success = time.time()
+                log("ok [%s]: %d squares, open days %s"
+                    % (key, seen, open_dates or "none"))
+                alert_openings(cfg, notifier, state, tgt, openings)
 
-            log("ok: %d squares, open days %s" % (seen, open_dates or "none"))
-
-            for op in openings:
-                key = opening_key(op)
-                if not useful(op, cfg["min_useful_seats"]):
-                    log("open but too small for the group: %s" % key)
-                    continue
-                if state.data["alerted"].get(op["date"]) == key:
-                    continue
-                text = describe(op, cfg)
-                result = notifier.alarm("Visa slot open", text,
-                                        cfg["alarm_repeat_seconds"], cfg["alarm_max_seconds"])
-                state.data["alerted"][op["date"]] = key
-                state.data["found"].append({
-                    "date": op["date"],
-                    "slots": [sl.describe() for sl in op["slots"]],
-                    "alerted_at": time.strftime("%H:%M", time.gmtime(time.time() + TASHKENT_OFFSET)),
-                    "telegram": result["telegram_confirmed"],
-                    "ntfy": result["ntfy_confirmed"],
-                })
+            except visasite.WrongCalendar as e:
+                trouble = True
+                state.data["wrong_calendar"] += 1
+                state.data["failures"] += 1
                 state.save()
-
-        except visasite.WrongCalendar as e:
-            state.data["wrong_calendar"] += 1
-            state.data["failures"] += 1
-            state.save()
-            log("WRONG CALENDAR: %s" % e)
-            notifier.notice(
-                "WRONG CALENDAR - the monitor is NOT watching what you asked for.\n\n"
-                "%s\n\nIt will keep retrying, and it will not report 'no slots' "
-                "while this is happening." % e)
-            s = visasite.Site()          # fresh session, then straight back in
-            time.sleep(5)
-            continue
-
-        except visasite.FetchFailed as e:
-            state.data["failures"] += 1
-            log("read failed (%s) - retrying in a moment" % e)
-            blind = time.time() - last_success
-            if blind > cfg["stale_read_warning_seconds"] and not stale_warned:
-                stale_warned = True
+                log("WRONG CALENDAR [%s]: %s" % (key, e))
                 notifier.notice(
-                    "No successful read of the calendar for %d minutes.\n"
-                    "Last error: %s\nStill trying every few seconds - this is NOT "
-                    "'no slots'." % (blind / 60, e))
-            if blind > 60:
-                s = visasite.Site()      # session may have gone sour; rebuild it
-            time.sleep(5)
-            continue
+                    "WRONG CALENDAR - the monitor is NOT watching what you asked for.\n\n"
+                    "Calendar: %s\n%s\n\nIt will keep retrying, and it will not report "
+                    "'no slots' for this calendar while this is happening."
+                    % (tgt["label"], e))
+                sessions[key] = visasite.Site()      # fresh session, straight back in
+
+            except visasite.FetchFailed as e:
+                trouble = True
+                state.data["failures"] += 1
+                log("read failed [%s] (%s) - retrying in a moment" % (key, e))
+                blind = time.time() - last_success
+                if blind > cfg["stale_read_warning_seconds"] and not stale_warned:
+                    stale_warned = True
+                    notifier.notice(
+                        "No successful read of any calendar for %d minutes.\n"
+                        "Last error: %s\nStill trying every few seconds - this is NOT "
+                        "'no slots'." % (blind / 60, e))
+                if blind > 60:
+                    sessions[key] = visasite.Site()  # session may have gone sour
+
+        if stale_warned and not trouble:
+            notifier.notice("Reading the calendars again normally.")
+            stale_warned = False
 
         state.save()
         maybe_daily_summary(cfg, notifier, state)
-        time.sleep(interval)
+        time.sleep(5 if trouble else interval)
+
+
+def alert_openings(cfg, notifier, state, tgt, openings):
+    for op in openings:
+        key = opening_key(op)
+        seen_key = "%s|%s" % (tgt["key"], op["date"])
+        if not useful(op, cfg["groups"]):
+            log("open but too small for either group [%s]: %s" % (tgt["key"], key))
+            continue
+        if state.data["alerted"].get(seen_key) == key:
+            continue
+        text = describe(op, cfg, tgt)
+        result = notifier.alarm("%s slots available" % tgt["headline"], text,
+                                cfg["alarm_repeat_seconds"], cfg["alarm_max_seconds"])
+        state.data["alerted"][seen_key] = key
+        state.data["found"].append({
+            "calendar": tgt["headline"],
+            "date": op["date"],
+            "slots": [sl.describe() for sl in op["slots"]],
+            "alerted_at": time.strftime("%H:%M", time.gmtime(time.time() + TASHKENT_OFFSET)),
+            "telegram": result["telegram_confirmed"],
+            "ntfy": result["ntfy_confirmed"],
+        })
+        state.save()
 
 
 def maybe_daily_summary(cfg, notifier, state):
@@ -257,7 +291,8 @@ def maybe_daily_summary(cfg, notifier, state):
 def daily_summary_text(cfg, state, today):
     d = state.data
     lines = ["Daily summary - %s (Tashkent)" % today,
-             "Watching: %s" % cfg["_target"]["label"],
+             "Watching: %s" % ", ".join(t["headline"] for t in cfg["_targets"]),
+             "Groups: %s" % " and ".join(str(g) for g in cfg["groups"]),
              "",
              "Checks completed: %d" % d.get("checks", 0),
              "Failed reads: %d" % d.get("failures", 0),
@@ -265,11 +300,13 @@ def daily_summary_text(cfg, state, today):
              ""]
     found = d.get("found") or []
     if not found:
-        lines.append("No slots today.")
+        lines.append("No slots today on any watched calendar.")
     else:
         lines.append("Slots found: %d" % len(found))
         for f in found:
-            lines.append("  %s at %s - %s" % (f["date"], f["alerted_at"], "; ".join(f["slots"])))
+            lines.append("  [%s] %s at %s - %s"
+                         % (f.get("calendar", "?"), f["date"], f["alerted_at"],
+                            "; ".join(f["slots"])))
             lines.append("    alerted: telegram=%s ntfy=%s"
                          % ("yes" if f["telegram"] else "NO", "yes" if f["ntfy"] else "NO"))
     return "\n".join(lines)
@@ -277,13 +314,26 @@ def daily_summary_text(cfg, state, today):
 
 # --------------------------------------------------------------------------
 
+def retrying(work, attempts, pause):
+    """Run work(), tolerating this site's routine 500s. WrongCalendar never retries."""
+    for i in range(attempts):
+        try:
+            return work()
+        except visasite.FetchFailed as e:
+            if i == attempts - 1:
+                raise
+            log("attempt %d/%d failed (%s), trying again" % (i + 1, attempts, e))
+            time.sleep(pause)
+
+
 def selftest(cfg, notifier):
     """Fire a real alert end to end and report honestly whether it worked."""
     text = ("SELF-TEST - this is not a real slot.\n\n"
             "Date: %s\nTimes:\n  - 09:30 (4 seats)\n\n"
             "If this reached both your phone and Telegram, the alarm path works.\n"
             "Press STOP ALARM to end it." % time.strftime("%Y-%m-%d"))
-    result = notifier.alarm("Visa monitor self-test", text, repeat_seconds=60, max_seconds=180)
+    result = notifier.alarm("Visa monitor self-test", text,
+                            repeat_seconds=cfg["alarm_repeat_seconds"], max_seconds=120)
     ok = result["telegram_confirmed"] and (notifier.ntfy is None or result["ntfy_confirmed"])
     notifier.notice(
         "Self-test %s.\nTelegram confirmed: %s\nntfy confirmed: %s\nRounds: %d\nStopped by: %s%s"
@@ -310,15 +360,23 @@ def main():
         return selftest(cfg, notifier)
 
     if args.once:
-        s = visasite.Site()
-        openings, seen, open_dates = scan_once(cfg, s, notifier)
-        print(json.dumps({
-            "target": cfg["_target"],
-            "squares_seen": seen,
-            "open_days": open_dates,
-            "openings": [{"date": o["date"], "slots": [x.describe() for x in o["slots"]],
-                          "max_group": o["max_group"]} for o in openings],
-        }, indent=2))
+        report = []
+        for tgt in cfg["_targets"]:
+            # A one-shot check gets one chance, and this site throws a 500 at
+            # roughly one request in thirteen. Keep trying for a minute before
+            # calling it a real failure; the live loop retries forever anyway.
+            openings, seen, open_dates = retrying(
+                lambda: scan_once(cfg, visasite.Site(), notifier, tgt), attempts=8, pause=8)
+            report.append({
+                "calendar": tgt["headline"],
+                "label": tgt["label"],
+                "category": tgt["category"], "event": tgt["event"],
+                "squares_seen": seen,
+                "open_days": open_dates,
+                "openings": [{"date": o["date"], "slots": [x.describe() for x in o["slots"]],
+                              "max_group": o["max_group"]} for o in openings],
+            })
+        print(json.dumps(report, indent=2))
         return 0
 
     state = State(args.state)

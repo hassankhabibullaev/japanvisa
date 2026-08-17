@@ -235,8 +235,8 @@ class Notifier:
                         stopped_by = "you (%s)" % kind
                         return self._alarm_result(started, rounds, tg_ok, ntfy_ok,
                                                   problems, stopped_by)
-                time.sleep(3)
-                waited += 3
+                time.sleep(1.5)
+                waited += 1.5
 
         return self._alarm_result(started, rounds, tg_ok, ntfy_ok, problems, stopped_by)
 

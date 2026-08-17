@@ -1,44 +1,53 @@
 {
-  "_README": "THE ONLY LINE YOU NORMALLY CHANGE IS 'target'. Set it to one of the keys under 'targets'.",
+  "_README": "THE ONLY LINES YOU NORMALLY CHANGE ARE 'watch' AND 'groups'. 'watch' lists the calendars to monitor, using keys from 'targets' below. Each one alerts separately.",
 
-  "target": "short_stay_representative",
+  "watch": [
+    "short_stay_representative",
+    "short_stay_applicant"
+  ],
+
+  "groups": [4, 3],
 
   "targets": {
     "short_stay_representative": {
       "category": 12,
       "event": 21,
+      "headline": "REPRESENTATIVE",
       "label": "Short stay - Representative or Travel Agency"
     },
     "short_stay_applicant": {
       "category": 12,
       "event": 20,
-      "label": "Short stay - Applicant (testing only)"
+      "headline": "INDIVIDUAL",
+      "label": "Short stay - Applicant (individual)"
     },
     "coe_representative": {
       "category": 15,
       "event": 17,
+      "headline": "COE REPRESENTATIVE",
       "label": "With COE - Representative"
     },
     "coe_applicant": {
       "category": 15,
       "event": 22,
       "plan": 14,
+      "headline": "COE INDIVIDUAL",
       "label": "With COE - Applicant"
     },
     "govdocs_representative": {
       "category": 16,
       "event": 18,
+      "headline": "GOV DOCS REPRESENTATIVE",
       "label": "With Government Documents - Representative"
     },
     "govdocs_applicant": {
       "category": 16,
       "event": 23,
+      "headline": "GOV DOCS INDIVIDUAL",
       "label": "With Government Documents - Applicant"
     }
   },
 
-  "group_size": 4,
-  "min_useful_seats": 3,
   "months_ahead": 2,
 
   "poll_seconds_busy": 15,
@@ -46,7 +55,7 @@
   "busy_hours_utc": [5, 12],
 
   "stale_read_warning_seconds": 180,
-  "alarm_repeat_seconds": 60,
+  "alarm_repeat_seconds": 10,
   "alarm_max_seconds": 900,
 
   "daily_summary_hour_tashkent": 21,
