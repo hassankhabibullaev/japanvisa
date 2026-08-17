@@ -13,6 +13,7 @@ confirmed is reported as a failure, not logged as a success.
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -238,6 +239,9 @@ class Notifier:
         self.ntfy = ntfy
         self.log = log
         self._last_sent = {}          # kind -> when, so a stuck fault cannot spam
+        self._alarms = {}             # key -> {thread, stop}
+        self._finished = []
+        self._alarm_lock = threading.Lock()
 
     def _typed(self, icon, kind, body, buttons=None):
         text = "%s %s\n%s\n%s" % (icon, kind, self.RULE, body.strip())
@@ -284,7 +288,64 @@ class Notifier:
 
     # -- the alarm --------------------------------------------------------
 
-    def alarm(self, title, text, repeat_seconds=60, max_seconds=900, click=None):
+    # -- ringing without going deaf ---------------------------------------
+    #
+    # An alarm used to run inside the monitoring loop, so for as long as it rang
+    # -- up to fifteen minutes -- nothing was being checked. The one moment you
+    # most want to keep watching is the moment a slot just opened, because the
+    # other calendar may be about to open too. Alarms now ring on their own
+    # threads and the loop carries on.
+
+    def ring(self, key, title, text, repeat_seconds, max_seconds, click=None):
+        """Start an alarm for `key` in the background. No-op if already ringing."""
+        with self._alarm_lock:
+            live = self._alarms.get(key)
+            if live and live["thread"].is_alive():
+                self.log("alarm '%s' already ringing" % key)
+                return False
+            stop = threading.Event()
+            t = threading.Thread(
+                target=self._ring_worker,
+                args=(key, stop, title, text, repeat_seconds, max_seconds, click),
+                daemon=True)
+            self._alarms[key] = {"thread": t, "stop": stop}
+        t.start()
+        return True
+
+    def _ring_worker(self, key, stop, title, text, repeat_seconds, max_seconds, click):
+        try:
+            result = self.alarm(title, text, repeat_seconds, max_seconds, click,
+                                stop_event=stop, stop_data="stop:" + key)
+        except Exception as e:                       # noqa: BLE001 - reported below
+            result = {"rounds": 0, "seconds": 0, "telegram_confirmed": False,
+                      "ntfy_confirmed": False, "problems": [str(e)],
+                      "stopped_by": "error"}
+        result["key"] = key
+        with self._alarm_lock:
+            self._finished.append(result)
+
+    def stop_ringing(self, key=None):
+        """Silence one alarm, or all of them when key is None."""
+        stopped = []
+        with self._alarm_lock:
+            for k, a in self._alarms.items():
+                if (key is None or k == key) and a["thread"].is_alive():
+                    a["stop"].set()
+                    stopped.append(k)
+        return stopped
+
+    def ringing(self):
+        with self._alarm_lock:
+            return [k for k, a in self._alarms.items() if a["thread"].is_alive()]
+
+    def take_finished(self):
+        """Hand back results of alarms that have ended, so the loop can log them."""
+        with self._alarm_lock:
+            out, self._finished = self._finished, []
+        return out
+
+    def alarm(self, title, text, repeat_seconds=60, max_seconds=900, click=None,
+              stop_event=None, stop_data="alarm_stop"):
         """Ring both channels until acknowledged, and give up after max_seconds.
 
         Returns a dict describing what actually happened, including whether each
@@ -296,7 +357,7 @@ class Notifier:
         problems = []
         stopped_by = "timeout"
 
-        buttons = [[{"text": "STOP ALARM", "callback_data": "alarm_stop"}]]
+        buttons = [[{"text": "STOP ALARM", "callback_data": stop_data}]]
 
         previous = None      # the buzz we are about to replace
 
@@ -333,19 +394,19 @@ class Notifier:
             # counts wall-clock from the start of the round, so sending time comes
             # out of the interval instead of stretching it.
             next_round = round_start + repeat_seconds
-            last_poll = 0.0
             while True:
                 now = time.time()
                 if now >= next_round or now - started >= max_seconds:
                     break
-                if now - last_poll >= 3:
-                    last_poll = now
+                if stop_event is not None and stop_event.wait(0.3):
+                    return self._alarm_result(started, rounds, tg_ok, ntfy_ok,
+                                              problems, "you")
+                if stop_event is None:
                     for kind, value in self.tg.poll_replies():
                         if value in self.STOP_WORDS:
-                            stopped_by = "you (%s)" % kind
                             return self._alarm_result(started, rounds, tg_ok, ntfy_ok,
-                                                      problems, stopped_by)
-                time.sleep(0.3)
+                                                      problems, "you (%s)" % kind)
+                    time.sleep(0.3)
 
         return self._alarm_result(started, rounds, tg_ok, ntfy_ok, problems, stopped_by)
 

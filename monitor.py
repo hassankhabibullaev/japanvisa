@@ -127,7 +127,7 @@ def ensure_selected(s, tgt):
         s.select(tgt["category"], tgt["event"], tgt.get("plan"))
 
 
-def scan_target(cfg, s, tgt):
+def scan_target(cfg, s, tgt, months=None):
     """Read every month of one calendar at once.
 
     The months are fetched in parallel because they are independent and the site
@@ -138,7 +138,8 @@ def scan_target(cfg, s, tgt):
     Raises whatever the fetches raised, so a wrong calendar still stops the scan.
     """
     ensure_selected(s, tgt)
-    months = months_to_scan(cfg["months_ahead"] + 1)
+    if months is None:
+        months = months_to_scan(cfg["months_ahead"] + 1)
 
     pages, errors = {}, []
     lock = threading.Lock()
@@ -267,7 +268,16 @@ def handle_commands(cfg, notifier, state):
     for kind, value in notifier.tg.poll_replies():
         value = (value or "").strip().lower().lstrip("/")
 
-        if value.startswith("set:"):
+        if value.startswith("stop:"):
+            who = value.split(":", 1)[1]
+            stopped = notifier.stop_ringing(who)
+            log("stopped alarms: %s" % (stopped or "none were ringing"))
+
+        elif value in notifier.STOP_WORDS:
+            stopped = notifier.stop_ringing(None)
+            log("stopped all alarms: %s" % (stopped or "none were ringing"))
+
+        elif value.startswith("set:"):
             try:
                 label, keys = PRESETS[int(value.split(":", 1)[1])]
             except (ValueError, IndexError):
@@ -303,20 +313,33 @@ def handle_commands(cfg, notifier, state):
 # the loop
 # --------------------------------------------------------------------------
 
-def poll_interval(cfg, now=None):
-    """Seconds to wait before looking again.
+def is_hot(cfg, now=None):
+    """Are we inside the hours when the embassy actually releases days?
 
-    Slots were observed appearing around 19:00 Tashkent and being gone inside two
-    minutes, so the hot window is checked several times a minute.
+    Observed between 16:00 and 21:00 Tashkent. Outside it we look once a minute,
+    which keeps the load off a site that already falls over on its own.
     """
     hour = time.gmtime(now if now is not None else time.time()).tm_hour
-    hot_lo, hot_hi = cfg["hot_hours_utc"]
-    day_lo, day_hi = cfg["day_hours_utc"]
-    if hot_lo <= hour < hot_hi:
-        return cfg["poll_seconds_hot"]
-    if day_lo <= hour < day_hi:
-        return cfg["poll_seconds_day"]
-    return cfg["poll_seconds_night"]
+    lo, hi = cfg["hot_hours_utc"]
+    return lo <= hour < hi
+
+
+def poll_interval(cfg, now=None):
+    return cfg["poll_seconds_hot"] if is_hot(cfg, now) else cfg["poll_seconds_rest"]
+
+
+def months_for(cfg, hot, due_full):
+    """Which months this pass should read.
+
+    A release lands about eleven days ahead, so during the rush only this month
+    and next can possibly hold one. Reading the third month too made every check
+    a third slower and a third heavier for nothing; it is swept on a timer
+    instead so nothing unusual can hide there.
+    """
+    everything = months_to_scan(cfg["months_ahead"] + 1)
+    if not hot or due_full:
+        return everything
+    return everything[:max(1, cfg.get("hot_months", 2))]
 
 
 def run(cfg, notifier, state, deadline):
@@ -326,6 +349,7 @@ def run(cfg, notifier, state, deadline):
     sessions = {t["key"]: visasite.Site() for t in targets}
     last_success = time.time()
     stale_warned = False
+    last_full_sweep = 0.0
 
     while time.time() < deadline:
         now = time.time()
@@ -341,8 +365,23 @@ def run(cfg, notifier, state, deadline):
             sessions = {t["key"]: visasite.Site() for t in targets}
             log("retargeted: %s" % ", ".join(t["key"] for t in targets))
 
+        hot = is_hot(cfg, now)
+        due_full = (now - last_full_sweep) >= cfg["full_sweep_seconds"]
+        months = months_for(cfg, hot, due_full)
+        if len(months) == cfg["months_ahead"] + 1:
+            last_full_sweep = now
         interval = poll_interval(cfg, now)
         trouble = False
+
+        # Alarms that finished since the last pass: record how delivery went.
+        for done in notifier.take_finished():
+            log("alarm '%s' ended after %ds (%s), telegram=%s ntfy=%s"
+                % (done.get("key"), done["seconds"], done["stopped_by"],
+                   done["telegram_confirmed"], done["ntfy_confirmed"]))
+            for f in state.data.get("found", []):
+                if f.get("telegram") is None:
+                    f["telegram"] = done["telegram_confirmed"]
+                    f["ntfy"] = done["ntfy_confirmed"]
 
         # Scan every calendar at once. Run one after another they simply add up,
         # and the whole point is to be looking at all of them at the same moment.
@@ -352,7 +391,7 @@ def run(cfg, notifier, state, deadline):
         def scan_into(t):
             try:
                 t0 = time.time()
-                results[t["key"]] = (scan_target(cfg, sessions[t["key"]], t),
+                results[t["key"]] = (scan_target(cfg, sessions[t["key"]], t, months),
                                      time.time() - t0, None)
             except Exception as e:                   # noqa: BLE001 - handled below
                 results[t["key"]] = (None, 0, e)
@@ -386,7 +425,7 @@ def run(cfg, notifier, state, deadline):
                 log("ok [%s] %.1fs: %d days, open %s"
                     % (key, took, len(states), open_dates or "none"))
 
-                handle_changes(cfg, notifier, state, tgt, states)
+                handle_changes(cfg, notifier, state, tgt, states)   # months-safe
                 alert_openings(cfg, notifier, state, tgt, open_dates)
 
             except visasite.WrongCalendar as e:
@@ -403,6 +442,18 @@ def run(cfg, notifier, state, deadline):
                     % (tgt["label"], e),
                     throttle_key="wrong-%s" % tgt["key"])
                 sessions[key] = visasite.Site()      # fresh session, straight back in
+
+            except visasite.Blocked as e:
+                trouble = True
+                state.data["failures"] += 1
+                state.note_event("blocked", "site refused us (%s)" % e)
+                log("BLOCKED [%s]: %s" % (key, e))
+                notifier.attention(
+                    "The site is REFUSING us, not just failing.",
+                    "%s\n\nThis is different from the usual server errors: it "
+                    "means we are being turned away. Worth slowing down or "
+                    "checking from somewhere else." % e,
+                    throttle_key="blocked")
 
             except visasite.FetchFailed as e:
                 trouble = True
@@ -427,9 +478,10 @@ def run(cfg, notifier, state, deadline):
 
         state.save()
         maybe_daily_report(cfg, notifier, state)
-        log("cycle %.1fs, next look in %ss" % (time.time() - cycle0,
-                                               5 if trouble else interval))
-        time.sleep(5 if trouble else interval)
+        log("cycle %.1fs over %d month(s)%s, next look in %ss"
+            % (time.time() - cycle0, len(months), " [hot]" if hot else "",
+               5 if trouble else interval))
+        wait_and_listen(cfg, notifier, state, 5 if trouble else interval)
 
 
 def handle_changes(cfg, notifier, state, tgt, states):
@@ -442,7 +494,14 @@ def handle_changes(cfg, notifier, state, tgt, states):
     """
     seen = state.data.setdefault("seen", {})
     before = seen.get(tgt["key"])
-    seen[tgt["key"]] = states
+
+    # Merge rather than replace: a hot pass reads only the near months, and
+    # overwriting would throw away what we know about the rest. diff_states
+    # ignores any date missing from either side, so a partial pass can never
+    # invent a change for a month it did not look at.
+    merged = dict(before or {})
+    merged.update(states)
+    seen[tgt["key"]] = merged
 
     if before is None:
         return                      # first look after a restart is the baseline
@@ -471,6 +530,25 @@ def handle_changes(cfg, notifier, state, tgt, states):
                                 visasite.CALENDAR_PAGE))
 
 
+def wait_and_listen(cfg, notifier, state, seconds):
+    """Sleep, but keep listening while an alarm is ringing.
+
+    Button presses are read in one place only, so two alarms can never swallow
+    each other's STOP. The cost is that a press waits for the next look -- so
+    while something is actually ringing, we check every couple of seconds.
+    """
+    end = time.time() + seconds
+    while True:
+        left = end - time.time()
+        if left <= 0:
+            return
+        if not notifier.ringing():
+            time.sleep(min(left, 1.0))
+            continue
+        handle_commands(cfg, notifier, state)
+        time.sleep(min(left, 2.0))
+
+
 def alert_openings(cfg, notifier, state, tgt, open_dates):
     """One alarm per calendar, listing every date that opened.
 
@@ -483,17 +561,19 @@ def alert_openings(cfg, notifier, state, tgt, open_dates):
         return
 
     text = describe(fresh, cfg, tgt)
-    result = notifier.alarm("%s slots available" % tgt["headline"], text,
-                            cfg["alarm_repeat_seconds"], cfg["alarm_max_seconds"],
-                            click=visasite.CALENDAR_PAGE)
+    # Rings on its own thread. Each calendar has its own alarm and its own STOP
+    # button, so the applicant calendar opening never silences or delays the
+    # representative one, and watching carries on while both are ringing.
+    notifier.ring(tgt["key"], "%s slots available" % tgt["headline"], text,
+                  cfg["alarm_repeat_seconds"], cfg["alarm_max_seconds"],
+                  click=visasite.CALENDAR_PAGE)
     for date in fresh:
         state.data["alerted"]["%s|%s" % (tgt["key"], date)] = "open"
         state.data["found"].append({
             "calendar": tgt["headline"],
             "date": date,
             "alerted_at": time.strftime("%H:%M", time.gmtime(time.time() + TASHKENT_OFFSET)),
-            "telegram": result["telegram_confirmed"],
-            "ntfy": result["ntfy_confirmed"],
+            "telegram": None, "ntfy": None,     # filled in when the alarm ends
         })
     state.save()
 
@@ -565,8 +645,11 @@ def daily_report_text(cfg, state, today, check):
     else:
         for f in found:
             L.append("   %s  %s" % (pretty_date(f["date"]), f.get("calendar", "")))
+            # None means the alarm was still ringing when this was written, which
+            # is not a failure -- only an explicit False is.
+            bad = (f.get("telegram") is False) or (f.get("ntfy") is False)
             L.append("      alerted %s%s" % (f["alerted_at"],
-                     "" if f["telegram"] and f["ntfy"] else "   DELIVERY PROBLEM"))
+                     "   DELIVERY PROBLEM" if bad else ""))
     L.append("")
 
     # Every state change with the time it happened. Over a few days this is what
@@ -713,10 +796,12 @@ def main():
     ])
     minutes = args.minutes if args.minutes is not None else cfg["run_minutes"]
     deadline = time.time() + minutes * 60
-    log("monitor starting: watching %s | %d months | poll %ss hot / %ss day / %ss night"
+    lo, hi = cfg["hot_hours_utc"]
+    log("monitor starting: watching %s | %ss during %02d-%02d UTC over %d months, "
+        "%ss otherwise over %d months"
         % (", ".join(t["headline"] for t in active_targets(cfg, state)),
-           cfg["months_ahead"] + 1, cfg["poll_seconds_hot"],
-           cfg["poll_seconds_day"], cfg["poll_seconds_night"]))
+           cfg["poll_seconds_hot"], lo, hi, cfg.get("hot_months", 2),
+           cfg["poll_seconds_rest"], cfg["months_ahead"] + 1))
     try:
         run(cfg, notifier, state, deadline)
     except KeyboardInterrupt:

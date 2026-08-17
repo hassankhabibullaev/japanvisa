@@ -99,9 +99,22 @@ Three things bought that:
   seconds decide whether the slot still exists, for numbers the alert does not
   even mention.
 
-The release window is set from observation: days appear around **19:00 Tashkent**,
-one new weekday at a time, roughly eleven days ahead. `hot_hours_utc` in
-`config.json` is where to change that as we learn more.
+The release window is **16:00–21:00 Tashkent**, where days have been seen to
+appear — one new weekday at a time, roughly eleven days ahead. Inside it the
+monitor checks every 5 seconds; outside it, once a minute, which keeps the load
+off a site that already falls over on its own. `hot_hours_utc` in `config.json`
+is where to change that as we learn more.
+
+During the rush only **this month and next** are read, since a release eleven days
+out cannot land anywhere else. That makes each check a third faster and a third
+lighter. All three months are still swept once a minute so nothing can hide in
+the one we skip.
+
+**Are we being blocked?** No — measured, not assumed. Forty requests as fast as the
+site could answer gave thirty successes, ten "server busy", and zero refusals.
+Being refused (HTTP 403 or 429) is now reported separately from the site merely
+failing, so if that ever starts you hear about it instead of it hiding among the
+usual errors.
 
 **An honest limit.** This is notify-only, by design — it never books. It can stop
 missing the moment and tell you the instant something moves, but it cannot
@@ -131,6 +144,14 @@ Repeats on Telegram and ntfy every 10 seconds until you press **STOP ALARM**,
 stopping by itself after 15 minutes. Each buzz replaces the previous one, so
 ninety buzzes leave one message in the chat. Several days opening at once go in
 one alarm, not one alarm each. Tapping the ntfy notification opens the calendar.
+
+**Each calendar has its own alarm, and they ring independently.** If the applicant
+calendar opens and the representative one opens seconds later, you get two
+separate alarms with two separate STOP buttons; neither deletes the other's
+messages. Crucially the alarms ring on their own threads, so **watching never
+pauses while something is ringing** — previously an alarm blocked the monitor for
+up to fifteen minutes, which meant the moment a slot opened was exactly the moment
+it stopped looking for the next one.
 
 **2. 👀 CALENDAR CHANGED** — Telegram only, no ringing. A day appearing or closing
 without ever being catchable, which is what a release taken inside a minute looks
@@ -235,8 +256,8 @@ against what was asked for, and a mismatch is a hard failure, never "no slots".
 It runs itself on GitHub Actions, free, on this public repository:
 
 - `monitor.yml` — the watcher. Each run watches for about five hours, then a fresh
-  run takes over. Checks every **5s** in the release window (13:00–16:00 UTC =
-  18:00–21:00 Tashkent), 15s through the rest of the day, 60s overnight.
+  run takes over. Checks every **5s** in the release window (11:00–16:00 UTC =
+  **16:00–21:00 Tashkent**) and once a minute the rest of the day.
 - `watchdog.yml` — every 10 minutes, checks a monitor run is actually alive and
   shouts on Telegram if not.
 - `selftest.yml` — Mondays, the loud alarm drill. Silent unless it fails.

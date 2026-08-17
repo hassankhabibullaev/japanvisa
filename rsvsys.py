@@ -36,6 +36,16 @@ class FetchFailed(Exception):
     """Network trouble or an HTTP 500. Normal weather here; retry."""
 
 
+class Blocked(FetchFailed):
+    """The site refused us rather than failed.
+
+    A 500 means the server fell over, which happens constantly and means nothing.
+    A 403 or 429 means it is turning us away on purpose, which would be the one
+    failure worth changing our behaviour over. They looked identical before, so
+    blocking could have started without anyone noticing.
+    """
+
+
 # --------------------------------------------------------------------------
 # parsing helpers
 # --------------------------------------------------------------------------
@@ -223,6 +233,9 @@ class Site:
                 with self.opener.open(make_request(), timeout=self.timeout) as r:
                     return r.read().decode("utf-8", "replace")
             except urllib.error.HTTPError as e:
+                if e.code in (403, 429):
+                    raise Blocked("HTTP %s - the site is refusing us%s"
+                                  % (e.code, describe))
                 last = "HTTP %s%s" % (e.code, describe)
             except Exception as e:
                 last = "%s%s" % (type(e).__name__, describe)

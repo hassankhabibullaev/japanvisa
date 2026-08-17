@@ -1,5 +1,5 @@
 {
-  "_README": "Change 'watch' to pick calendars (keys from 'targets'). poll_seconds_hot applies inside hot_hours_utc, _day inside day_hours_utc, _night otherwise. Times are UTC; Tashkent is UTC+5.",
+  "_README": "Change 'watch' to pick calendars (keys from 'targets'). Inside hot_hours_utc it checks every poll_seconds_hot across hot_months; otherwise every poll_seconds_rest. All months are swept at least every full_sweep_seconds. Times are UTC, Tashkent is UTC+5.",
   "watch": [
     "short_stay_representative",
     "short_stay_applicant"
@@ -44,17 +44,14 @@
     }
   },
   "months_ahead": 2,
-  "poll_seconds_hot": 5,
-  "poll_seconds_day": 15,
-  "poll_seconds_night": 60,
   "hot_hours_utc": [
-    13,
+    11,
     16
   ],
-  "day_hours_utc": [
-    3,
-    18
-  ],
+  "poll_seconds_hot": 5,
+  "poll_seconds_rest": 60,
+  "hot_months": 2,
+  "full_sweep_seconds": 60,
   "stale_read_warning_seconds": 180,
   "alarm_repeat_seconds": 10,
   "alarm_max_seconds": 900,
