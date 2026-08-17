@@ -87,36 +87,45 @@ class Slot:
         return "Slot(%s, available=%s, seats=%s)" % (self.time, self.available, self.seats)
 
 
-def parse_month(html):
-    """Return the Day objects the grid actually shows for bookable dates.
+DAY_NUMBER = re.compile(r'class="sc_cal_date[^"]*">(.*?)</div>', re.S)
 
-    Only OPEN days carry a trustworthy date (the site puts it in the link), so
-    those are returned with exact dates. Everything else is returned for counting
-    with date=None. UNKNOWN means the markup changed and a human must look.
+
+def parse_month(html, year=None, mon=None):
+    """Return one Day per square of the month grid.
+
+    Read the day number by stripping tags, never by expecting a bare digit right
+    after the class. On an open day this site wraps the number in a link --
+    `<div class="sc_cal_date"><a ...>20</a></div>` against `...">19</div>` when
+    closed -- so a digit-only pattern matches every closed day and silently skips
+    every open one, which is the exact shape of "cheerfully reports no slots".
+
+    Availability comes from the icon file name. Closed is icon_disabled; anything
+    else with an icon is treated as bookable, including icons never seen before.
     """
     days = []
     for cell in _cells(html):
-        daynum = re.search(r'class="sc_cal_date[^"]*">\s*(\d+)', cell)
-        if not daynum:
+        m = DAY_NUMBER.search(cell)
+        if not m:
             continue
+        digits = re.search(r"(\d+)", re.sub(r"<[^>]+>", " ", m.group(1)))
+        if not digits:
+            continue
+        daynum = int(digits.group(1))
 
-        disabled = "icon_disabled" in cell
         link = re.search(r'data-date="(\d{4}/\d{2}/\d{2})"', cell)
-        clickable = "js_change_date" in cell and link is not None
-        has_icon = "icon_" in cell
+        date = link.group(1).replace("/", "-") if link else None
+        if date is None and year and mon:
+            date = "%04d-%02d-%02d" % (year, mon, daynum)
 
-        if disabled and not clickable:
-            days.append(Day(None, Day.FULL))
-        elif clickable and not disabled:
-            days.append(Day(link.group(1).replace("/", "-"), Day.OPEN))
-        elif not has_icon and not clickable:
-            days.append(Day(None, Day.NONE))
+        icons = set(re.findall(r"(icon_[a-z_]+)\.svg", cell))
+        if not icons:
+            days.append(Day(date, Day.NONE))
+        elif "icon_disabled" in icons:
+            days.append(Day(date, Day.FULL))
         else:
-            # Clickable AND disabled, or an icon with no link: not a shape this
-            # site has shown us. Escalate rather than guess it means "closed".
-            date = link.group(1).replace("/", "-") if link else None
-            days.append(Day(date, Day.UNKNOWN,
-                            "unrecognised cell: disabled=%s clickable=%s" % (disabled, clickable)))
+            # icon_circle, or a shape we have not met. Both mean "look at it".
+            note = "" if icons == {"icon_circle"} else "unfamiliar icon %s" % sorted(icons)
+            days.append(Day(date, Day.OPEN, note))
     return days
 
 
@@ -316,6 +325,7 @@ class Site:
         html = self._navigate(date, "month")
         self._check(html, self.category, self.event, self.plan,
                     want_month="%04d-%02d" % (year, mon), want_disp="month")
+        self.last_month = (year, mon)
         return html
 
     def day(self, date):

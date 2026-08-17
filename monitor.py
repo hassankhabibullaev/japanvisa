@@ -122,7 +122,7 @@ def scan_once(cfg, s, notifier, tgt):
     unknown = []
     for (y, m) in months_to_scan(cfg["months_ahead"] + 1):
         html = s.month(y, m)
-        for d in visasite.parse_month(html):
+        for d in visasite.parse_month(html, y, m):
             seen += 1
             if d.state == visasite.Day.OPEN and d.date not in open_dates:
                 open_dates.append(d.date)
@@ -239,6 +239,8 @@ def handle_commands(cfg, notifier, state):
                 label, keys = PRESETS[int(value.split(":", 1)[1])]
             except (ValueError, IndexError):
                 continue
+            if state.data.get("watch_override") == keys:
+                continue                      # already watching that; say nothing
             state.data["watch_override"] = keys
             state.data["alerted"] = {}        # a new calendar starts fresh
             state.save()
@@ -259,7 +261,7 @@ def handle_commands(cfg, notifier, state):
                                   time.strftime("%Y-%m-%d",
                                                 time.gmtime(time.time() + TASHKENT_OFFSET)),
                                   check),
-                title="REPORT SO FAR")
+                title="REPORT - TODAY SO FAR")
 
     return changed
 
@@ -281,7 +283,11 @@ def run(cfg, notifier, state, deadline):
         today = time.strftime("%Y-%m-%d", time.gmtime(now + TASHKENT_OFFSET))
         state.roll_day(today)
 
-        if handle_commands(cfg, notifier, state):
+        acted = handle_commands(cfg, notifier, state)
+        if notifier.tg.offset != state.data.get("tg_offset"):
+            state.data["tg_offset"] = notifier.tg.offset
+            state.save()
+        if acted:
             targets = active_targets(cfg, state)
             sessions = {t["key"]: visasite.Site() for t in targets}
             log("retargeted: %s" % ", ".join(t["key"] for t in targets))
@@ -429,23 +435,29 @@ def tick(ok):
 
 def daily_report_text(cfg, state, today, check):
     d = state.data
-    L = ["%s" % pretty_date(today), ""]
+    L = [pretty_date(today), ""]
 
-    found = d.get("found") or []
-    if found:
-        L.append("\U0001F514 SLOTS FOUND  %d" % len(found))
-        for f in found:
-            L.append("   %s - %s" % (pretty_date(f["date"]), f.get("calendar", "?")))
-            L.append("   alerted %s%s" % (f["alerted_at"],
-                     "" if f["telegram"] and f["ntfy"] else "  (delivery problem)"))
-    else:
-        L.append("\U0001F514 SLOTS FOUND  none")
-    L.append("")
-
-    L.append("\U0001F50D MONITORING")
+    # What it is watching goes first: it is the question worth answering fastest,
+    # and a switch that failed to apply shows up here immediately.
+    L.append("\U0001F441 WATCHING")
     for t in active_targets(cfg, state):
         L.append("   %s" % t["label"])
-    L.append("   %d checks, %d failed reads" % (d.get("checks", 0), d.get("failures", 0)))
+    L.append("")
+
+    found = d.get("found") or []
+    L.append("\U0001F514 SLOTS FOUND")
+    if not found:
+        L.append("   none")
+    else:
+        for f in found:
+            L.append("   %s  %s" % (pretty_date(f["date"]), f.get("calendar", "")))
+            L.append("      alerted %s%s" % (f["alerted_at"],
+                     "" if f["telegram"] and f["ntfy"] else "   DELIVERY PROBLEM"))
+    L.append("")
+
+    L.append("\U0001F50D ACTIVITY")
+    L.append("   %s checks" % d.get("checks", 0))
+    L.append("   %s failed reads" % d.get("failures", 0))
     L.append("")
 
     events = d.get("events") or []
@@ -455,18 +467,18 @@ def daily_report_text(cfg, state, today, check):
     else:
         for e in events[-8:]:
             span = e["at"] if not e.get("until") else "%s-%s" % (e["at"], e["until"])
-            times = "" if e.get("count", 1) == 1 else " x%d" % e["count"]
+            times = "" if e.get("count", 1) == 1 else "  x%d" % e["count"]
             L.append("   %s  %s%s" % (span, e["detail"], times))
     L.append("")
 
     L.append("\U0001F9EA SELF-CHECK")
-    L.append("   site reachable     %s" % tick(check["site"]))
-    L.append("   correct calendar   %s" % tick(check["calendar"]))
-    L.append("   phone alarm (ntfy) %s" % tick(check["ntfy"]))
-    L.append("   telegram           OK")
+    L.append("   site            %s" % tick(check["site"]))
+    L.append("   right calendar  %s" % tick(check["calendar"]))
+    L.append("   phone alarm     %s" % tick(check["ntfy"]))
+    L.append("   telegram        OK")
     drill = d.get("drill")
     if drill:
-        L.append("   weekly alarm drill %s (%s)"
+        L.append("   alarm drill     %s  (%s)"
                  % ("OK" if drill.get("passed") else "FAILED", drill.get("when", "?")))
     if check["detail"]:
         L.append("")
@@ -475,7 +487,7 @@ def daily_report_text(cfg, state, today, check):
     healthy = check["site"] and check["calendar"] and check["ntfy"] is not False
     L.append("")
     L.append("─" * 12)
-    L.append("Everything working." if healthy else "NEEDS YOUR ATTENTION - see above.")
+    L.append("✅ Everything working" if healthy else "❗ Needs your attention")
     return "\n".join(L)
 
 
@@ -556,7 +568,8 @@ def main():
         return 0
 
     state = State(args.state)
-    log("discarded %d stale Telegram updates" % notifier.tg.drain())
+    notifier.tg._offset = state.data.get("tg_offset")
+    log("resuming Telegram reads at offset %s" % notifier.tg.offset)
     notifier.tg.register_commands([
         ("watch", "Change which calendars are watched"),
         ("status", "What it is watching and today's counts"),

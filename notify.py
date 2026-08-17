@@ -43,10 +43,10 @@ class Delivery:
 
 
 class Telegram:
-    def __init__(self, token, chat_id):
+    def __init__(self, token, chat_id, offset=None):
         self.token = token
         self.chat_id = str(chat_id)
-        self._offset = None
+        self._offset = offset
 
     def _call(self, method, params, timeout=20):
         url = TG_API % (self.token, method)
@@ -117,20 +117,16 @@ class Telegram:
         except Exception:
             return False
 
-    def drain(self):
-        """Throw away anything already queued, without acting on it.
+    @property
+    def offset(self):
+        """How far through the update queue we have read.
 
-        Telegram keeps undelivered updates for about a day. Without this, a run
-        starting up would replay button presses from hours ago -- re-announcing a
-        switch that was made and forgotten long before.
+        Saved between runs. Without it a restart either replays button presses
+        from hours ago or, if they are simply discarded, loses a press made while
+        the runner was restarting -- which is exactly how a switch to COE went
+        missing.
         """
-        dropped = 0
-        while True:
-            batch = self.poll_replies()
-            dropped += len(batch)
-            if len(batch) < 100:
-                break
-        return dropped
+        return self._offset
 
     def poll_replies(self, timeout=2):
         """Recent button presses and messages, for the alarm snooze."""

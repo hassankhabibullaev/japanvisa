@@ -2,8 +2,8 @@
   "_README": "THE ONLY LINES YOU NORMALLY CHANGE ARE 'watch' AND 'groups'. 'watch' lists the calendars to monitor, using keys from 'targets' below. Each one alerts separately.",
 
   "watch": [
-    "short_stay_representative",
-    "short_stay_applicant"
+    "coe_representative",
+    "coe_applicant"
   ],
 
   "groups": [4, 3],
