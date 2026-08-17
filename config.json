@@ -58,6 +58,6 @@
   "alarm_repeat_seconds": 10,
   "alarm_max_seconds": 900,
 
-  "daily_summary_hour_tashkent": 21,
+  "daily_report_hour_tashkent": 21,
   "run_minutes": 300
 }

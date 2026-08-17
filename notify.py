@@ -164,7 +164,8 @@ class Ntfy:
     def __init__(self, topic):
         self.topic = topic
 
-    def send(self, title, text, tries=3, verify=True, click=None):
+    def send(self, title, text, tries=3, verify=True, click=None,
+             priority="urgent", tags="rotating_light"):
         """Publish at max priority.
 
         With verify=True the topic is read back and the message found before this
@@ -175,8 +176,7 @@ class Ntfy:
         last = "no attempt"
         for attempt in range(tries):
             try:
-                headers = {"Title": title, "Priority": "urgent",
-                           "Tags": "rotating_light"}
+                headers = {"Title": title, "Priority": priority, "Tags": tags}
                 if click:
                     headers["Click"] = click     # tapping the buzz opens the calendar
                 status, raw = _req("%s/%s" % (NTFY, self.topic),
@@ -230,51 +230,49 @@ class Notifier:
 
     STOP_WORDS = {"stop", "snooze", "/stop", "ok", "seen", "alarm_stop"}
 
-    ALARM = "\U0001F514"      # bell
-    WARNING = "⚠️"  # warning triangle
-    ERROR = "\U0001F6D1"      # stop sign
-    STATUS = "ℹ️"   # information
-    SUMMARY = "\U0001F4CA"    # bar chart
-    CRASH = "\U0001F4A5"      # collision
-    TEST = "\U0001F9EA"       # test tube
+    # Exactly three kinds of message get sent on the monitor's own initiative.
+    ALARM = "\U0001F514"      # bell     - a slot is open, this one rings
+    REPORT = "\U0001F4CA"     # chart    - the once-a-day report
+    ATTENTION = "⚠"      # warning  - something needs a human, sent at once
+
+    RULE = "─" * 12           # short enough not to wrap on a phone
 
     def __init__(self, telegram, ntfy=None, log=print):
         self.tg = telegram
         self.ntfy = ntfy
         self.log = log
-
-    # -- routine, Telegram only -------------------------------------------
+        self._last_sent = {}          # kind -> when, so a stuck fault cannot spam
 
     def _typed(self, icon, kind, body, buttons=None):
-        text = "%s  %s\n%s\n\n%s" % (icon, kind, "─" * 22, body.strip())
+        text = "%s %s\n%s\n%s" % (icon, kind, self.RULE, body.strip())
         d = self.tg.send(text, buttons=buttons)
         self.log("telegram %s: %s" % (kind.lower(), d))
         return d
 
-    def warn(self, body):
-        return self._typed(self.WARNING, "WARNING", body)
+    def report(self, body, title="DAILY REPORT"):
+        """The one scheduled message: what happened today and whether it is well."""
+        return self._typed(self.REPORT, title, body)
 
-    def error(self, body):
-        return self._typed(self.ERROR, "PROBLEM", body)
+    def attention(self, headline, body, throttle_key=None, throttle_seconds=1800):
+        """Something a human should know about, now.
 
-    def status(self, body):
-        return self._typed(self.STATUS, "STATUS", body)
-
-    def summary(self, body):
-        return self._typed(self.SUMMARY, "DAILY SUMMARY", body)
-
-    def crash(self, body):
-        return self._typed(self.CRASH, "MONITOR STOPPED", body)
-
-    def test(self, body):
-        return self._typed(self.TEST, "SELF-TEST", body)
+        A fault that persists would otherwise send one of these every polling
+        cycle, so the same kind repeats at most every half hour. It is always
+        recorded in the day's report regardless.
+        """
+        if throttle_key:
+            last = self._last_sent.get(throttle_key, 0)
+            if time.time() - last < throttle_seconds:
+                self.log("attention '%s' held back (sent %ds ago)"
+                         % (throttle_key, int(time.time() - last)))
+                return Delivery(True, "throttled")
+            self._last_sent[throttle_key] = time.time()
+        return self._typed(self.ATTENTION, "NEEDS ATTENTION",
+                           "%s\n\n%s" % (headline, body))
 
     def menu(self, body, buttons):
-        return self._typed(self.STATUS, "CHANGE WHAT IS WATCHED", body, buttons=buttons)
-
-    # Kept so older call sites keep working; routine information.
-    def notice(self, text):
-        return self.status(text)
+        """Only ever shown because you asked for it."""
+        return self._typed("⚙", "WATCHING", body, buttons=buttons)
 
     # -- the alarm --------------------------------------------------------
 
@@ -297,8 +295,8 @@ class Notifier:
         while time.time() - started < max_seconds:
             round_start = time.time()
             rounds += 1
-            body = "%s  %s\n%s\n\n%s" % (self.ALARM, title.upper(), "─" * 22, text)
-            head = body if rounds == 1 else "%s\n\n(still ringing - %d)" % (body, rounds)
+            body = "%s %s\n%s\n%s" % (self.ALARM, "SLOT AVAILABLE", self.RULE, text)
+            head = body if rounds == 1 else "%s\n\n(ringing - %d)" % (body, rounds)
 
             d = self.tg.send(head, buttons=buttons, tries=1 if rounds > 1 else 3)
             tg_ok = tg_ok or d.ok
@@ -356,9 +354,10 @@ class Notifier:
 
         # If a channel never confirmed, say so on the channel that did.
         if not ntfy_ok and self.ntfy and tg_ok:
-            self.warn("The ntfy alarm could NOT be confirmed just now.\n"
-                      "Telegram worked, so you are reading this.\n\nReason: %s"
-                      % (problems[-1] if problems else "unknown"))
+            self.attention("Your phone alarm (ntfy) is not working.",
+                           "Telegram worked, which is why you can read this.\n\n%s"
+                           % (problems[-1] if problems else "reason unknown"),
+                           throttle_key="ntfy-dead")
         return result
 
 

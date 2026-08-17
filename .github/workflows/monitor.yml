@@ -53,10 +53,12 @@ jobs:
           python3 - <<'PY'
           import os, urllib.parse, urllib.request
           url = "https://api.telegram.org/bot%s/sendMessage" % os.environ["TELEGRAM_BOT_TOKEN"]
-          text = ("MONITOR RUN FAILED on GitHub Actions.\n"
-                  "It is not watching right now. A new run should start within 15 minutes; "
-                  "the watchdog will complain if it does not.\n"
-                  "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          text = (
+              "\u26a0 NEEDS ATTENTION\n"
+              "────────────\n"
+              "The monitor run stopped unexpectedly.\n\n"
+              "It is not watching right now. A new run should start within 15 minutes, and the watchdog will say so if it does not.\n\n"
+              "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
           data = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode()
           urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20).read()
           PY

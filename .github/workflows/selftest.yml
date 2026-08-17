@@ -1,8 +1,8 @@
-name: weekly-selftest
+name: weekly-alarm-drill
 
-# Once a week, fire a real alert through the real alarm path on both channels and
-# report whether it could be confirmed. Press STOP ALARM to end it; it stops by
-# itself after 3 minutes either way.
+# Once a week, fire a real alert through the real alarm path on both channels.
+# This is the only thing that proves the alarm actually rings. A pass is recorded
+# and shown in the daily report; only a failure sends a message.
 
 on:
   schedule:
@@ -53,7 +53,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python3 monitor.py --selftest
 
-      - name: Say so if the self-test itself broke
+      - name: Say so if the drill itself broke
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -62,11 +62,12 @@ jobs:
           python3 - <<'PY'
           import os, urllib.parse, urllib.request
           url = "https://api.telegram.org/bot%s/sendMessage" % os.environ["TELEGRAM_BOT_TOKEN"]
-          text = ("WEEKLY SELF-TEST FAILED.\n\n"
-                  "Either the live site check, the detection replay, or the alarm could not "
-                  "be confirmed. The monitor may be watching the wrong thing or unable to "
-                  "reach you.\n"
-                  "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          text = (
+              "\u26a0 NEEDS ATTENTION\n"
+              "────────────\n"
+              "The weekly alarm drill could not complete.\n\n"
+              "Either the live site check, the detection replay, or the alarm itself failed. The monitor may be watching the wrong thing, or unable to reach you.\n\n"
+              "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
           data = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode()
           urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20).read()
           PY

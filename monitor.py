@@ -60,11 +60,25 @@ def months_to_scan(count, now=None):
 # --------------------------------------------------------------------------
 
 class State:
+    FRESH_DAY = {"checks": 0, "failures": 0, "wrong_calendar": 0,
+                 "found": [], "alerted": {}, "events": []}
+
     def __init__(self, path):
         self.path = path
-        self.data = {"date": None, "checks": 0, "failures": 0, "wrong_calendar": 0,
-                     "found": [], "summary_sent_for": None, "alerted": {}}
+        self.data = {"date": None, "summary_sent_for": None, "watch_override": None}
+        self.data.update(dict(self.FRESH_DAY))
         self.load()
+
+    def note_event(self, kind, detail):
+        """Remember a fault with its Tashkent time, for the day's report."""
+        events = self.data.setdefault("events", [])
+        stamp = time.strftime("%H:%M", time.gmtime(time.time() + TASHKENT_OFFSET))
+        if events and events[-1]["kind"] == kind and events[-1]["detail"] == detail:
+            events[-1]["count"] = events[-1].get("count", 1) + 1
+            events[-1]["until"] = stamp
+        else:
+            events.append({"at": stamp, "kind": kind, "detail": detail, "count": 1})
+        del events[:-20]
 
     def load(self):
         try:
@@ -84,8 +98,10 @@ class State:
 
     def roll_day(self, today):
         if self.data.get("date") != today:
-            self.data.update({"date": today, "checks": 0, "failures": 0,
-                              "wrong_calendar": 0, "found": [], "alerted": {}})
+            self.data["date"] = today
+            self.data.update({k: (list(v) if isinstance(v, list) else
+                                  dict(v) if isinstance(v, dict) else v)
+                              for k, v in self.FRESH_DAY.items()})
             self.save()
 
 
@@ -114,11 +130,12 @@ def scan_once(cfg, s, notifier, tgt):
                 unknown.append("%s: %s" % (d.date or "%04d-%02d" % (y, m), d.note))
 
     if unknown:
-        notifier.warn(
-            "Calendar markup changed on the %s calendar - the monitor saw day "
-            "squares it does not recognise and cannot judge:\n" % tgt["label"] +
-            "\n".join(unknown[:8]) +
-            "\n\nStill running, but treat 'no slots' with suspicion until this is fixed.")
+        notifier.attention(
+            "The calendar layout changed and cannot be read reliably.",
+            "Calendar: %s\n\n%s\n\nStill running, but do not trust "
+            "\"no slots\" until this is looked at."
+            % (tgt["label"], "\n".join(unknown[:6])),
+            throttle_key="markup-%s" % tgt["key"])
 
     openings = []
     for date in open_dates:
@@ -150,12 +167,12 @@ def opening_key(opening):
 
 
 def pretty_date(iso):
-    """2026-08-27 -> 'Thu, 27 August 2026'. Falls back to the raw value."""
+    """2026-08-27 -> '27 August 2026'. Falls back to the raw value."""
     try:
         t = time.strptime(iso, "%Y-%m-%d")
     except ValueError:
         return iso
-    return time.strftime("%a, %d %B %Y", t)
+    return "%d %s %d" % (t.tm_mday, time.strftime("%B", t), t.tm_year)
 
 
 def describe(openings, cfg, tgt):
@@ -226,23 +243,23 @@ def handle_commands(cfg, notifier, state):
             state.data["alerted"] = {}        # a new calendar starts fresh
             state.save()
             changed = True
-            notifier.status("Switched to: %s\n\n%s"
-                            % (label, watching_line(active_targets(cfg, state))))
+            notifier.menu("Now watching:\n%s"
+                          % watching_line(active_targets(cfg, state)), menu_buttons())
 
         elif value in ("watch", "switch", "menu", "change", "start", "help"):
             notifier.menu(
-                "%s\n\nTap a line to change it. Send 'status' any time to see what "
-                "it is doing." % watching_line(active_targets(cfg, state)),
-                menu_buttons())
+                "%s\n\nTap to change. Send /status for today's report."
+                % watching_line(active_targets(cfg, state)), menu_buttons())
 
         elif value == "status":
-            d = state.data
-            notifier.status(
-                "%s\n\nToday so far:\n  checks %d\n  failed reads %d\n"
-                "  wrong-calendar events %d\n  slots found %d"
-                % (watching_line(active_targets(cfg, state)), d.get("checks", 0),
-                   d.get("failures", 0), d.get("wrong_calendar", 0),
-                   len(d.get("found") or [])))
+            # The same report the daily message uses, on demand.
+            check = self_check(cfg, notifier, state)
+            notifier.report(
+                daily_report_text(cfg, state, state.data.get("date") or
+                                  time.strftime("%Y-%m-%d",
+                                                time.gmtime(time.time() + TASHKENT_OFFSET)),
+                                  check),
+                title="REPORT SO FAR")
 
     return changed
 
@@ -289,34 +306,38 @@ def run(cfg, notifier, state, deadline):
                 state.data["failures"] += 1
                 state.save()
                 log("WRONG CALENDAR [%s]: %s" % (key, e))
-                notifier.error(
-                    "The site served the WRONG CALENDAR - this is not what you asked "
-                    "for.\n\n"
-                    "Calendar: %s\n%s\n\nIt will keep retrying, and it will not report "
-                    "'no slots' for this calendar while this is happening."
-                    % (tgt["label"], e))
+                state.note_event("wrong-calendar", "wrong calendar served (%s)" % tgt["headline"])
+                notifier.attention(
+                    "The site served the WRONG calendar.",
+                    "Asked for: %s\n\n%s\n\nIt keeps retrying and will NOT report "
+                    "\"no slots\" for this calendar while this lasts."
+                    % (tgt["label"], e),
+                    throttle_key="wrong-%s" % tgt["key"])
                 sessions[key] = visasite.Site()      # fresh session, straight back in
 
             except visasite.FetchFailed as e:
                 trouble = True
                 state.data["failures"] += 1
+                state.note_event("read-failed", "could not read site (%s)" % e)
                 log("read failed [%s] (%s) - retrying in a moment" % (key, e))
                 blind = time.time() - last_success
                 if blind > cfg["stale_read_warning_seconds"] and not stale_warned:
                     stale_warned = True
-                    notifier.warn(
-                        "No successful read of any calendar for %d minutes.\n"
-                        "Last error: %s\nStill trying every few seconds - this is NOT "
-                        "'no slots'." % (blind / 60, e))
+                    notifier.attention(
+                        "Cannot read the calendar right now.",
+                        "Nothing has been read for %d minutes.\nLast error: %s\n\n"
+                        "Still retrying every few seconds. This is NOT \"no slots\"."
+                        % (blind / 60, e),
+                        throttle_key="stale")
                 if blind > 60:
                     sessions[key] = visasite.Site()  # session may have gone sour
 
         if stale_warned and not trouble:
-            notifier.status("Reading the calendars again normally.")
+            log("reading normally again after a stale spell")
             stale_warned = False
 
         state.save()
-        maybe_daily_summary(cfg, notifier, state)
+        maybe_daily_report(cfg, notifier, state)
         time.sleep(5 if trouble else interval)
 
 
@@ -357,41 +378,105 @@ def alert_openings(cfg, notifier, state, tgt, openings):
     state.save()
 
 
-def maybe_daily_summary(cfg, notifier, state):
+def maybe_daily_report(cfg, notifier, state):
     tash = time.gmtime(time.time() + TASHKENT_OFFSET)
     today = time.strftime("%Y-%m-%d", tash)
-    if tash.tm_hour < cfg["daily_summary_hour_tashkent"]:
+    if tash.tm_hour < cfg["daily_report_hour_tashkent"]:
         return
     if state.data.get("summary_sent_for") == today:
         return
-    notifier.summary(daily_summary_text(cfg, state, today))
+    check = self_check(cfg, notifier, state)
+    notifier.report(daily_report_text(cfg, state, today, check))
     state.data["summary_sent_for"] = today
     state.save()
 
 
-def daily_summary_text(cfg, state, today):
-    d = state.data
-    lines = ["%s (Tashkent)" % pretty_date(today),
-             "",
-             watching_line(active_targets(cfg, state)),
-             "",
-             "Checks completed: %d" % d.get("checks", 0),
-             "Failed reads: %d" % d.get("failures", 0),
-             "Wrong-calendar events: %d" % d.get("wrong_calendar", 0),
-             ""]
-    found = d.get("found") or []
-    if not found:
-        lines.append("No slots today on any watched calendar.")
+def self_check(cfg, notifier, state):
+    """Prove the whole chain still works, without ringing anybody.
+
+    Reads the live site and confirms it serves the calendar asked for, then sends
+    one silent ntfy message and reads it back off the server. Telegram needs no
+    separate test: the report itself is the test.
+    """
+    result = {"site": False, "calendar": False, "ntfy": False, "detail": ""}
+    tgt = active_targets(cfg, state)[0]
+    try:
+        s = visasite.Site()
+        s.select(tgt["category"], tgt["event"], tgt.get("plan"))
+        retrying(lambda: s.month(*months_to_scan(1)[0]), attempts=4, pause=6)
+        result["site"] = result["calendar"] = True
+    except visasite.WrongCalendar as e:
+        result["site"] = True
+        result["detail"] = "wrong calendar: %s" % e
+    except visasite.FetchFailed as e:
+        result["detail"] = "site unreadable: %s" % e
+
+    if notifier.ntfy:
+        d = notifier.ntfy.send("Daily check", "Monitor is alive. No action needed.",
+                               priority="min", tags="white_check_mark")
+        result["ntfy"] = d.ok
+        if not d.ok:
+            result["detail"] = (result["detail"] + "; " if result["detail"] else "") + \
+                               "ntfy: %s" % d.detail
     else:
-        lines.append("Slots found: %d" % len(found))
+        result["ntfy"] = None
+    return result
+
+
+def tick(ok):
+    return "OK" if ok else ("skipped" if ok is None else "FAILED")
+
+
+def daily_report_text(cfg, state, today, check):
+    d = state.data
+    L = ["%s" % pretty_date(today), ""]
+
+    found = d.get("found") or []
+    if found:
+        L.append("\U0001F514 SLOTS FOUND  %d" % len(found))
         for f in found:
-            lines.append("  %s - %s (alerted %s)"
-                         % (f.get("calendar", "?"), pretty_date(f["date"]), f["alerted_at"]))
-            if not (f["telegram"] and f["ntfy"]):
-                lines.append("    delivery: telegram=%s ntfy=%s"
-                             % ("yes" if f["telegram"] else "NO",
-                                "yes" if f["ntfy"] else "NO"))
-    return "\n".join(lines)
+            L.append("   %s - %s" % (pretty_date(f["date"]), f.get("calendar", "?")))
+            L.append("   alerted %s%s" % (f["alerted_at"],
+                     "" if f["telegram"] and f["ntfy"] else "  (delivery problem)"))
+    else:
+        L.append("\U0001F514 SLOTS FOUND  none")
+    L.append("")
+
+    L.append("\U0001F50D MONITORING")
+    for t in active_targets(cfg, state):
+        L.append("   %s" % t["label"])
+    L.append("   %d checks, %d failed reads" % (d.get("checks", 0), d.get("failures", 0)))
+    L.append("")
+
+    events = d.get("events") or []
+    L.append("⚠ PROBLEMS")
+    if not events:
+        L.append("   none")
+    else:
+        for e in events[-8:]:
+            span = e["at"] if not e.get("until") else "%s-%s" % (e["at"], e["until"])
+            times = "" if e.get("count", 1) == 1 else " x%d" % e["count"]
+            L.append("   %s  %s%s" % (span, e["detail"], times))
+    L.append("")
+
+    L.append("\U0001F9EA SELF-CHECK")
+    L.append("   site reachable     %s" % tick(check["site"]))
+    L.append("   correct calendar   %s" % tick(check["calendar"]))
+    L.append("   phone alarm (ntfy) %s" % tick(check["ntfy"]))
+    L.append("   telegram           OK")
+    drill = d.get("drill")
+    if drill:
+        L.append("   weekly alarm drill %s (%s)"
+                 % ("OK" if drill.get("passed") else "FAILED", drill.get("when", "?")))
+    if check["detail"]:
+        L.append("")
+        L.append("   %s" % check["detail"])
+
+    healthy = check["site"] and check["calendar"] and check["ntfy"] is not False
+    L.append("")
+    L.append("─" * 12)
+    L.append("Everything working." if healthy else "NEEDS YOUR ATTENTION - see above.")
+    return "\n".join(L)
 
 
 # --------------------------------------------------------------------------
@@ -408,21 +493,30 @@ def retrying(work, attempts, pause):
             time.sleep(pause)
 
 
-def selftest(cfg, notifier):
+def selftest(cfg, notifier, state=None):
     """Fire a real alert end to end and report honestly whether it worked."""
     text = ("This is a drill, not a real slot.\n\n%s\n\n%s"
             % (pretty_date(time.strftime("%Y-%m-%d")), visasite.CALENDAR_PAGE))
     result = notifier.alarm("Self-test (drill)", text,
                             repeat_seconds=cfg["alarm_repeat_seconds"], max_seconds=120)
     ok = result["telegram_confirmed"] and (notifier.ntfy is None or result["ntfy_confirmed"])
-    notifier.test(
-        "Weekly self-test %s.\n\nTelegram delivered: %s\nntfy delivered: %s\n"
-        "Buzzes sent: %d\nEnded by: %s%s"
-        % ("PASSED" if ok else "FAILED",
-           "yes" if result["telegram_confirmed"] else "NO",
-           "yes" if result["ntfy_confirmed"] else "NO",
-           result["rounds"], result["stopped_by"],
-           "" if not result["problems"] else "\n\nProblems: " + "; ".join(result["problems"][:4])))
+
+    # A passing drill is not news -- it is recorded and shown in the daily report.
+    # Only a failure is worth interrupting anybody for.
+    if state is not None:
+        state.data["drill"] = {
+            "passed": ok,
+            "when": time.strftime("%d %b", time.gmtime(time.time() + TASHKENT_OFFSET)),
+        }
+        state.save()
+    if not ok:
+        notifier.attention(
+            "The weekly alarm drill FAILED - you might not be reachable.",
+            "Telegram delivered: %s\nntfy delivered: %s\nBuzzes sent: %d%s"
+            % ("yes" if result["telegram_confirmed"] else "NO",
+               "yes" if result["ntfy_confirmed"] else "NO", result["rounds"],
+               "" if not result["problems"] else
+               "\n\n" + "; ".join(result["problems"][:3])))
     return 0 if ok else 1
 
 
@@ -439,7 +533,7 @@ def main():
     notifier = notify.from_env(log=log)
 
     if args.selftest:
-        return selftest(cfg, notifier)
+        return selftest(cfg, notifier, State(args.state))
 
     if args.once:
         report = []
@@ -481,9 +575,9 @@ def main():
     except Exception:
         tb = traceback.format_exc()
         log(tb)
-        notifier.crash("The monitor hit an error and has stopped watching.\n"
-                       "A fresh run should take over within 15 minutes.\n\n%s"
-                       % tb.strip().splitlines()[-1][:400])
+        notifier.attention("The monitor crashed and has stopped watching.",
+                           "A fresh run should take over within 15 minutes.\n\n%s"
+                           % tb.strip().splitlines()[-1][:300])
         return 1
     log("run window finished cleanly; a fresh run takes over")
     return 0

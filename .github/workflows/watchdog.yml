@@ -36,9 +36,12 @@ jobs:
             python3 - <<'PY'
           import os, urllib.parse, urllib.request
           url = "https://api.telegram.org/bot%s/sendMessage" % os.environ["TELEGRAM_BOT_TOKEN"]
-          text = ("MONITOR IS NOT RUNNING.\n\n"
-                  "No monitor run is active or queued. The watchdog is starting one now.\n"
-                  "If you get this repeatedly, something is wrong with the workflow itself.")
+          text = (
+              "\u26a0 NEEDS ATTENTION\n"
+              "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+              "The monitor is NOT running.\n\n"
+              "No run is active or queued, so nothing is being watched. Starting one now. "
+              "If this repeats, the workflow itself needs looking at.")
           data = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode()
           urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20).read()
           PY
