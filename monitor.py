@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import traceback
 
@@ -38,8 +39,6 @@ def load_config(path="config.json"):
         t["key"] = key
         targets.append(t)
     cfg["_targets"] = targets
-    if not cfg.get("groups"):
-        raise SystemExit("config 'groups' is empty - no group size to look for")
     return cfg
 
 
@@ -61,11 +60,14 @@ def months_to_scan(count, now=None):
 
 class State:
     FRESH_DAY = {"checks": 0, "failures": 0, "wrong_calendar": 0,
-                 "found": [], "alerted": {}, "events": []}
+                 "found": [], "alerted": {}, "events": [], "transitions": []}
 
     def __init__(self, path):
         self.path = path
-        self.data = {"date": None, "summary_sent_for": None, "watch_override": None}
+        # "seen" is the calendar's own state, not a daily tally, so it must not
+        # be cleared at midnight or every day would start by re-reporting itself.
+        self.data = {"date": None, "summary_sent_for": None, "watch_override": None,
+                     "seen": {}}
         self.data.update(dict(self.FRESH_DAY))
         self.load()
 
@@ -113,57 +115,65 @@ class WrongCalendarAlert(Exception):
     pass
 
 
-def scan_once(cfg, s, notifier, tgt):
-    """Return (openings, days_seen). Raises on a verified-wrong calendar."""
-    s.select(tgt["category"], tgt["event"], tgt.get("plan"))
+def ensure_selected(s, tgt):
+    """Select the calendar only when the session is not already on it.
 
-    seen = 0
-    open_dates = []
-    unknown = []
-    for (y, m) in months_to_scan(cfg["months_ahead"] + 1):
-        html = s.month(y, m)
-        for d in visasite.parse_month(html, y, m):
-            seen += 1
-            if d.state == visasite.Day.OPEN and d.date not in open_dates:
-                open_dates.append(d.date)
-            elif d.state == visasite.Day.UNKNOWN:
-                unknown.append("%s: %s" % (d.date or "%04d-%02d" % (y, m), d.note))
-
-    if unknown:
-        notifier.attention(
-            "The calendar layout changed and cannot be read reliably.",
-            "Calendar: %s\n\n%s\n\nStill running, but do not trust "
-            "\"no slots\" until this is looked at."
-            % (tgt["label"], "\n".join(unknown[:6])),
-            throttle_key="markup-%s" % tgt["key"])
-
-    openings = []
-    for date in open_dates:
-        html = s.day(date)
-        slots = visasite.parse_day(html)
-        cap = visasite.max_group_size(html)
-        free = [sl for sl in slots if sl.available]
-        if free:
-            openings.append({"date": date, "slots": free, "max_group": cap})
-    return openings, seen, open_dates
-
-
-def useful(opening, groups):
-    """Worth waking someone only if a slot could hold the smallest group.
-
-    A slot whose seat count the site did not state also counts: a slot we cannot
-    measure is never silently discarded.
+    Re-selecting every cycle cost a request per calendar per cycle -- about six
+    seconds of a thirty-five second cycle, spent re-answering a question the
+    session had already answered.
     """
-    need = min(groups)
-    for sl in opening["slots"]:
-        if sl.seats is None or sl.seats >= need:
-            return True
-    return False
+    if (s.plan is None or s.category != str(tgt["category"])
+            or s.event != str(tgt["event"])):
+        s.select(tgt["category"], tgt["event"], tgt.get("plan"))
 
 
-def opening_key(opening):
-    return opening["date"] + "|" + ",".join(
-        "%s:%s" % (sl.time, "?" if sl.seats is None else sl.seats) for sl in opening["slots"])
+def scan_target(cfg, s, tgt):
+    """Read every month of one calendar at once.
+
+    The months are fetched in parallel because they are independent and the site
+    answers in about three and a half seconds each; one after another that is the
+    difference between seeing a slot and reading about it afterwards.
+
+    Returns (states, unknown) where states maps YYYY-MM-DD to open/full/none.
+    Raises whatever the fetches raised, so a wrong calendar still stops the scan.
+    """
+    ensure_selected(s, tgt)
+    months = months_to_scan(cfg["months_ahead"] + 1)
+
+    pages, errors = {}, []
+    lock = threading.Lock()
+
+    def fetch(y, m):
+        try:
+            html = s.month(y, m)
+            with lock:
+                pages[(y, m)] = html
+        except Exception as e:                       # noqa: BLE001 - re-raised below
+            with lock:
+                errors.append(e)
+
+    threads = [threading.Thread(target=fetch, args=(y, m)) for (y, m) in months]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    if errors:
+        wrong = [e for e in errors if isinstance(e, visasite.WrongCalendar)]
+        raise (wrong[0] if wrong else errors[0])
+
+    states, unknown = {}, []
+    for (y, m), html in pages.items():
+        for d in visasite.parse_month(html, y, m):
+            if not d.date:
+                continue
+            if d.state == visasite.Day.UNKNOWN:
+                unknown.append("%s: %s" % (d.date, d.note))
+            # A date can appear in two grids (trailing days of the next month).
+            # Bookable always wins so a day is never hidden by its other copy.
+            if states.get(d.date) != visasite.Day.OPEN:
+                states[d.date] = d.state
+    return states, unknown
 
 
 def pretty_date(iso):
@@ -175,14 +185,37 @@ def pretty_date(iso):
     return "%d %s %d" % (t.tm_mday, time.strftime("%B", t), t.tm_year)
 
 
-def describe(openings, cfg, tgt):
+def describe(dates, cfg, tgt):
     """The dates that opened, and the link. Nothing else.
 
     An alarm is read half-awake on a lock screen, so times and seat counts are
     deliberately left out -- they are on the site, one tap away.
     """
-    dates = "\n".join(pretty_date(o["date"]) for o in openings)
-    return "%s\n\n%s" % (dates, visasite.CALENDAR_PAGE)
+    return "%s\n\n%s\n\n%s" % (tgt["headline"],
+                               "\n".join(pretty_date(d) for d in dates),
+                               visasite.CALENDAR_PAGE)
+
+
+# How a day changed, in words worth reading on a phone.
+TRANSITIONS = {
+    ("none", "full"): "opened and was taken before we saw it",
+    ("none", "open"): "OPENED",
+    ("full", "open"): "seats freed up",
+    ("open", "full"): "filled up",
+    ("open", "none"): "withdrawn",
+    ("full", "none"): "reception withdrawn",
+}
+
+
+def diff_states(before, after):
+    """Every day whose state changed, as (date, from, to, wording)."""
+    out = []
+    for date in sorted(set(before) | set(after)):
+        was, now = before.get(date), after.get(date)
+        if was is None or now is None or was == now:
+            continue
+        out.append((date, was, now, TRANSITIONS.get((was, now), "%s -> %s" % (was, now))))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -270,13 +303,29 @@ def handle_commands(cfg, notifier, state):
 # the loop
 # --------------------------------------------------------------------------
 
+def poll_interval(cfg, now=None):
+    """Seconds to wait before looking again.
+
+    Slots were observed appearing around 19:00 Tashkent and being gone inside two
+    minutes, so the hot window is checked several times a minute.
+    """
+    hour = time.gmtime(now if now is not None else time.time()).tm_hour
+    hot_lo, hot_hi = cfg["hot_hours_utc"]
+    day_lo, day_hi = cfg["day_hours_utc"]
+    if hot_lo <= hour < hot_hi:
+        return cfg["poll_seconds_hot"]
+    if day_lo <= hour < day_hi:
+        return cfg["poll_seconds_day"]
+    return cfg["poll_seconds_night"]
+
+
 def run(cfg, notifier, state, deadline):
     targets = active_targets(cfg, state)
-    # One session per calendar, so switching between them can never leak state.
+    # One session per calendar, kept alive across cycles so the calendar is
+    # selected once rather than re-selected on every pass.
     sessions = {t["key"]: visasite.Site() for t in targets}
     last_success = time.time()
     stale_warned = False
-    busy_lo, busy_hi = cfg["busy_hours_utc"]
 
     while time.time() < deadline:
         now = time.time()
@@ -292,19 +341,53 @@ def run(cfg, notifier, state, deadline):
             sessions = {t["key"]: visasite.Site() for t in targets}
             log("retargeted: %s" % ", ".join(t["key"] for t in targets))
 
-        hour = time.gmtime(now).tm_hour
-        interval = cfg["poll_seconds_busy"] if busy_lo <= hour < busy_hi else cfg["poll_seconds_quiet"]
+        interval = poll_interval(cfg, now)
         trouble = False
+
+        # Scan every calendar at once. Run one after another they simply add up,
+        # and the whole point is to be looking at all of them at the same moment.
+        cycle0 = time.time()
+        results = {}
+
+        def scan_into(t):
+            try:
+                t0 = time.time()
+                results[t["key"]] = (scan_target(cfg, sessions[t["key"]], t),
+                                     time.time() - t0, None)
+            except Exception as e:                   # noqa: BLE001 - handled below
+                results[t["key"]] = (None, 0, e)
+
+        workers = [threading.Thread(target=scan_into, args=(t,)) for t in targets]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
 
         for tgt in targets:
             key = tgt["key"]
+            payload, took, failure = results.get(key, (None, 0, None))
             try:
-                openings, seen, open_dates = scan_once(cfg, sessions[key], notifier, tgt)
+                if failure:
+                    raise failure
+                states, unknown = payload
                 state.data["checks"] += 1
                 last_success = time.time()
-                log("ok [%s]: %d squares, open days %s"
-                    % (key, seen, open_dates or "none"))
-                alert_openings(cfg, notifier, state, tgt, openings)
+
+                if unknown:
+                    notifier.attention(
+                        "The calendar layout changed and cannot be read reliably.",
+                        "Calendar: %s\n\n%s\n\nStill running, but do not trust "
+                        "\"no slots\" until this is looked at."
+                        % (tgt["label"], "\n".join(unknown[:6])),
+                        throttle_key="markup-%s" % key)
+
+                open_dates = sorted(d for d, st in states.items()
+                                    if st == visasite.Day.OPEN)
+                log("ok [%s] %.1fs: %d days, open %s"
+                    % (key, took, len(states), open_dates or "none"))
+
+                handle_changes(cfg, notifier, state, tgt, states)
+                alert_openings(cfg, notifier, state, tgt, open_dates)
 
             except visasite.WrongCalendar as e:
                 trouble = True
@@ -344,39 +427,70 @@ def run(cfg, notifier, state, deadline):
 
         state.save()
         maybe_daily_report(cfg, notifier, state)
+        log("cycle %.1fs, next look in %ss" % (time.time() - cycle0,
+                                               5 if trouble else interval))
         time.sleep(5 if trouble else interval)
 
 
-def alert_openings(cfg, notifier, state, tgt, openings):
+def handle_changes(cfg, notifier, state, tgt, states):
+    """Record every state change, and say so when a release happens.
+
+    A day going straight from "no reception" to "full" is how a release that was
+    taken within a minute looks afterwards. Reporting it is worth doing even
+    though the seats are gone: it means a release is happening right now, and
+    there may be a leftover seat a refresh away.
+    """
+    seen = state.data.setdefault("seen", {})
+    before = seen.get(tgt["key"])
+    seen[tgt["key"]] = states
+
+    if before is None:
+        return                      # first look after a restart is the baseline
+
+    changes = diff_states(before, states)
+    if not changes:
+        return
+
+    stamp = time.strftime("%H:%M:%S", time.gmtime(time.time() + TASHKENT_OFFSET))
+    for date, was, now, wording in changes:
+        state.data.setdefault("transitions", []).append(
+            {"at": stamp, "calendar": tgt["headline"], "date": date,
+             "from": was, "to": now, "what": wording})
+        log("CHANGE [%s] %s %s -> %s" % (tgt["key"], date, was, now))
+    del state.data["transitions"][:-40]
+    state.save()
+
+    # Days that became bookable are handled by the alarm; anything else is news
+    # you want quickly but should not be woken by.
+    quiet = [c for c in changes if c[2] != visasite.Day.OPEN]
+    if quiet:
+        notifier.changed(
+            "%s\n\n%s\n\n%s" % (tgt["headline"],
+                                "\n".join("%s  -  %s" % (pretty_date(d), w)
+                                          for d, _, _, w in quiet),
+                                visasite.CALENDAR_PAGE))
+
+
+def alert_openings(cfg, notifier, state, tgt, open_dates):
     """One alarm per calendar, listing every date that opened.
 
-    Grouped deliberately: three open days used to mean three alarms queued back to
-    back, three quarters of an hour of ringing for one piece of news.
+    Fired straight off the month grid. Opening each day to read its seat counts
+    first cost another few seconds per day on the one path where seconds decide
+    whether the slot is still there, and the alert does not mention seats anyway.
     """
-    fresh = []
-    for op in openings:
-        key = opening_key(op)
-        seen_key = "%s|%s" % (tgt["key"], op["date"])
-        if not useful(op, cfg["groups"]):
-            log("open but too small for either group [%s]: %s" % (tgt["key"], key))
-            continue
-        if state.data["alerted"].get(seen_key) == key:
-            continue
-        fresh.append((seen_key, key, op))
-
+    fresh = [d for d in open_dates if state.data["alerted"].get("%s|%s" % (tgt["key"], d)) != "open"]
     if not fresh:
         return
 
-    text = describe([op for _, _, op in fresh], cfg, tgt)
+    text = describe(fresh, cfg, tgt)
     result = notifier.alarm("%s slots available" % tgt["headline"], text,
                             cfg["alarm_repeat_seconds"], cfg["alarm_max_seconds"],
                             click=visasite.CALENDAR_PAGE)
-    for seen_key, key, op in fresh:
-        state.data["alerted"][seen_key] = key
+    for date in fresh:
+        state.data["alerted"]["%s|%s" % (tgt["key"], date)] = "open"
         state.data["found"].append({
             "calendar": tgt["headline"],
-            "date": op["date"],
-            "slots": [sl.describe() for sl in op["slots"]],
+            "date": date,
             "alerted_at": time.strftime("%H:%M", time.gmtime(time.time() + TASHKENT_OFFSET)),
             "telegram": result["telegram_confirmed"],
             "ntfy": result["ntfy_confirmed"],
@@ -453,6 +567,18 @@ def daily_report_text(cfg, state, today, check):
             L.append("   %s  %s" % (pretty_date(f["date"]), f.get("calendar", "")))
             L.append("      alerted %s%s" % (f["alerted_at"],
                      "" if f["telegram"] and f["ntfy"] else "   DELIVERY PROBLEM"))
+    L.append("")
+
+    # Every state change with the time it happened. Over a few days this is what
+    # tells us when the embassy actually releases, instead of guessing from one
+    # observation.
+    trans = d.get("transitions") or []
+    L.append("\U0001F504 CALENDAR CHANGES")
+    if not trans:
+        L.append("   none")
+    else:
+        for t in trans[-10:]:
+            L.append("   %s  %s  %s" % (t["at"], pretty_date(t["date"]), t["what"]))
     L.append("")
 
     L.append("\U0001F50D ACTIVITY")
@@ -553,14 +679,24 @@ def main():
             # A one-shot check gets one chance, and this site throws a 500 at
             # roughly one request in thirteen. Keep trying for a minute before
             # calling it a real failure; the live loop retries forever anyway.
-            openings, seen, open_dates = retrying(
-                lambda: scan_once(cfg, visasite.Site(), notifier, tgt), attempts=8, pause=8)
+            sess = visasite.Site()
+            states, unknown = retrying(lambda: scan_target(cfg, sess, tgt),
+                                       attempts=8, pause=8)
+            open_dates = sorted(d for d, st in states.items() if st == visasite.Day.OPEN)
+            openings = []
+            for date in open_dates:                 # diagnostics only, never in the loop
+                html = sess.day(date)
+                free = [x for x in visasite.parse_day(html) if x.available]
+                openings.append({"date": date, "slots": free,
+                                 "max_group": visasite.max_group_size(html)})
             report.append({
                 "calendar": tgt["headline"],
                 "label": tgt["label"],
                 "category": tgt["category"], "event": tgt["event"],
-                "squares_seen": seen,
+                "days_read": len(states),
+                "reception_days": sorted(d for d, st in states.items() if st != "none"),
                 "open_days": open_dates,
+                "unreadable": unknown,
                 "openings": [{"date": o["date"], "slots": [x.describe() for x in o["slots"]],
                               "max_group": o["max_group"]} for o in openings],
             })
@@ -577,10 +713,10 @@ def main():
     ])
     minutes = args.minutes if args.minutes is not None else cfg["run_minutes"]
     deadline = time.time() + minutes * 60
-    log("monitor starting: watching %s | groups %s | %d months | poll %ss/%ss"
+    log("monitor starting: watching %s | %d months | poll %ss hot / %ss day / %ss night"
         % (", ".join(t["headline"] for t in active_targets(cfg, state)),
-           cfg["groups"], cfg["months_ahead"] + 1,
-           cfg["poll_seconds_busy"], cfg["poll_seconds_quiet"]))
+           cfg["months_ahead"] + 1, cfg["poll_seconds_hot"],
+           cfg["poll_seconds_day"], cfg["poll_seconds_night"]))
     try:
         run(cfg, notifier, state, deadline)
     except KeyboardInterrupt:

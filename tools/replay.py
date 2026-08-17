@@ -59,11 +59,9 @@ def main():
     date = open_days[0].date if open_days else "(from day page)"
     opening = {"date": date, "slots": free, "max_group": rsvsys.max_group_size(day)}
     tgt = cfg["_targets"][0]
-    text = monitor.describe([opening], cfg, tgt)
+    text = monitor.describe([date], cfg, tgt)
     print("\n--- alert this would send ---")
     print(text)
-    print("--- worth waking you for groups of %s? %s ---"
-          % (cfg["groups"], monitor.useful(opening, cfg["groups"])))
 
     if args.alert:
         n = notify.from_env()

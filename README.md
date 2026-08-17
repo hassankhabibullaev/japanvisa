@@ -14,11 +14,10 @@ opened. Current month plus the next two.
 - **REPRESENTATIVE** — category 12 / event 21, Representative or Travel Agency
 - **INDIVIDUAL** — category 12 / event 20, Applicant
 
-Change **two lines** in `config.json` and nothing else:
+Change **one line** in `config.json` and nothing else:
 
 ```json
-"watch":  ["short_stay_representative", "short_stay_applicant"],
-"groups": [4, 3]
+"watch": ["short_stay_representative", "short_stay_applicant"]
 ```
 
 `watch` takes any of the keys under `targets` in the same file:
@@ -31,9 +30,6 @@ Change **two lines** in `config.json` and nothing else:
 | `coe_applicant` | with COE, Applicant |
 | `govdocs_representative` | with Government Documents, Representative |
 | `govdocs_applicant` | with Government Documents, Applicant |
-
-`groups` is the sizes you need to seat — `[4, 3]` for one group of four and one of
-three. It is used to decide what is worth waking you for, not shown in alerts.
 
 ### Changing it from Telegram
 
@@ -61,33 +57,61 @@ applicants went into a single appointment.
 So a group of four and a group of three each fit in one slot. Seven people do not,
 which is why two separate bookings are needed.
 
-**The number of seats left has never been observed live on this site.** Every day
-is currently booked out, and a full slot shows only a crossed-out icon with no
-number at all. Two things are nevertheless known about how the count is expressed:
+Seat counts were confirmed live on 17 August on an open COE day: the slot cell
+carries `data-stock="15"`, and other days showed 20. So the count is real, and a
+day typically opens with far more seats than one group needs.
 
-- The booking system's own code hides slots whose hidden `data-stock` number is
-  below the number of people you selected — so a per-slot count exists.
-- The identical software at another Japanese embassy prints it in the slot as
-  `残N件`.
+**Alerts no longer mention seats, and the monitor no longer reads them.** Opening
+each day to check cost several seconds per day on the one path where seconds
+decide whether the slot still exists — and with a maximum of five applicants per
+booking against fifteen-to-twenty seats on release, the number was never going to
+change the answer. If a day is bookable, you are told immediately; the seats are
+on the site.
 
-The monitor reads **both** forms, and if a slot opens showing neither it still
-alerts, worded `seats not shown`. An unreadable count is never a reason to stay
-quiet. Until a real opening appears, treat any seat number in an alert as the
-site's claim rather than something this project has validated.
+`tools/fixtures/real_month_open_coe.html` and `real_day_open_coe.html` are genuine
+captures of an open month and an open day. The other `*_open_*.html` files are
+hand-made variants used to test shapes the site has not shown us.
 
-> Anything in `tools/fixtures/*_open_*.html` is invented test data. The "3 seats"
-> in those files is a number typed into `tools/make_fixtures.py`, not a reading
-> from the embassy.
+## Speed, and why it matters
 
-The month grid never shows seat counts at all. That is why every day that looks
-open is opened up and read properly before you are told anything.
+Slots on the short-stay calendar are gone in **one to two minutes** — other people
+are clearly running booking bots. On 17 August a day opened and was taken before
+the monitor looked twice.
 
-You are woken only when a slot could hold your smaller group. A slot too small for
-either group is logged and appears in the daily report instead.
+What one check costs, measured against the live site:
+
+| | before | now |
+| --- | --- | --- |
+| one calendar, three months | ~17s | ~5s |
+| both calendars | ~35s | ~7s |
+| wait between checks (release window) | 55s | 5s |
+| **gap between looks** | **~90s** | **~12s** |
+
+Three things bought that:
+
+- **The calendar is selected once**, not re-selected on every pass. That request
+  alone was six seconds per calendar per cycle.
+- **Months and calendars are fetched at the same time** instead of one after
+  another. The site answers in about 3.5s regardless, so waiting in sequence was
+  pure loss.
+- **Alerts fire straight off the month grid.** It used to open each day to read
+  seat counts before alerting — several more seconds on the one path where
+  seconds decide whether the slot still exists, for numbers the alert does not
+  even mention.
+
+The release window is set from observation: days appear around **19:00 Tashkent**,
+one new weekday at a time, roughly eleven days ahead. `hot_hours_utc` in
+`config.json` is where to change that as we learn more.
+
+**An honest limit.** This is notify-only, by design — it never books. It can stop
+missing the moment and tell you the instant something moves, but it cannot
+out-click a bot that books automatically. If slots keep vanishing inside a minute,
+winning one means being parked on the page during the window with the userscript
+already run.
 
 ## How you are told
 
-There are only **three** kinds of message.
+There are **four** kinds of message, and only one of them rings.
 
 **1. 🔔 SLOT AVAILABLE** — the only one that rings. The calendar, the dates, the
 link. No times, no seat counts; those are on the site, one tap away.
@@ -108,13 +132,28 @@ stopping by itself after 15 minutes. Each buzz replaces the previous one, so
 ninety buzzes leave one message in the chat. Several days opening at once go in
 one alarm, not one alarm each. Tapping the ntfy notification opens the calendar.
 
-**2. ⚠ NEEDS ATTENTION** — sent the moment something needs a human: the wrong
+**2. 👀 CALENDAR CHANGED** — Telegram only, no ringing. A day appearing or closing
+without ever being catchable, which is what a release taken inside a minute looks
+like afterwards. Worth knowing in seconds — there may be a leftover seat a refresh
+away — but not worth being woken for something unbookable.
+
+```
+👀 CALENDAR CHANGED
+────────────
+REPRESENTATIVE
+
+28 August 2026  -  opened and was taken before we saw it
+
+https://uzembassyryouji.rsvsys.jp/reservations/calendar
+```
+
+**3. ⚠ NEEDS ATTENTION** — sent the moment something needs a human: the wrong
 calendar, the site unreadable, a layout change it cannot judge, a crash, a dead
 runner, or a failed alarm drill. A fault that persists repeats at most every 30
 minutes so a stuck problem cannot flood the chat, and it always appears in the
 day's report regardless.
 
-**3. 📊 DAILY REPORT** — one message a day at 21:00 Tashkent, built to be scanned
+**4. 📊 DAILY REPORT** — one message a day at 21:00 Tashkent, built to be scanned
 rather than read. It merges the day's activity, the problems with their times, and
 a live self-check:
 
@@ -123,32 +162,37 @@ a live self-check:
 ────────────
 17 August 2026
 
-🔔 SLOTS FOUND  1
-   27 August 2026 - REPRESENTATIVE
-   alerted 11:42
-
-🔍 MONITORING
+👁 WATCHING
    Short stay - Representative or Travel Agency
    Short stay - Applicant (individual)
-   1284 checks, 31 failed reads
+
+🔔 SLOTS FOUND
+   none
+
+🔄 CALENDAR CHANGES
+   19:01:22  28 August 2026  opened and was taken before we saw it
+
+🔍 ACTIVITY
+   2140 checks
+   47 failed reads
 
 ⚠ PROBLEMS
-   11:04-11:09  could not read site (HTTP 500) x27
-   14:22  wrong calendar served (REPRESENTATIVE)
+   19:00-19:04  could not read site (HTTP 500)  x31
 
 🧪 SELF-CHECK
-   site reachable     OK
-   correct calendar   OK
-   phone alarm (ntfy) OK
-   telegram           OK
-   weekly alarm drill OK (17 Aug)
+   site            OK
+   right calendar  OK
+   phone alarm     OK
+   telegram        OK
+   alarm drill     OK  (17 Aug)
 
 ────────────
-Everything working.
+✅ Everything working
 ```
 
-The last line is the whole report in one glance: *Everything working.* or
-*NEEDS YOUR ATTENTION - see above.*
+The last line is the whole report in one glance. **CALENDAR CHANGES** is the
+important one over time: every state change with the time it happened, which is
+how the real release schedule gets pinned down instead of guessed.
 
 The self-check is real, not a checkbox. It reads the live site and confirms the
 calendar served is the one asked for, then sends one **silent** ntfy message and
@@ -191,7 +235,8 @@ against what was asked for, and a mismatch is a hard failure, never "no slots".
 It runs itself on GitHub Actions, free, on this public repository:
 
 - `monitor.yml` — the watcher. Each run watches for about five hours, then a fresh
-  run takes over. Polls every 15s during 05:00–12:00 UTC and every 55s otherwise.
+  run takes over. Checks every **5s** in the release window (13:00–16:00 UTC =
+  18:00–21:00 Tashkent), 15s through the rest of the day, 60s overnight.
 - `watchdog.yml` — every 10 minutes, checks a monitor run is actually alive and
   shouts on Telegram if not.
 - `selftest.yml` — Mondays, the loud alarm drill. Silent unless it fails.

@@ -266,6 +266,18 @@ class Notifier:
         return self._typed(self.ATTENTION, "NEEDS ATTENTION",
                            "%s\n\n%s" % (headline, body))
 
+    def changed(self, body, throttle_key="changed", throttle_seconds=20):
+        """A release happened but the seats are already gone.
+
+        Telegram only and no ringing: it is news worth having in seconds, but
+        being woken for something unbookable would teach you to ignore the bell.
+        """
+        last = self._last_sent.get(throttle_key, 0)
+        if time.time() - last < throttle_seconds:
+            return Delivery(True, "throttled")
+        self._last_sent[throttle_key] = time.time()
+        return self._typed("\U0001F440", "CALENDAR CHANGED", body)
+
     def menu(self, body, buttons):
         """Only ever shown because you asked for it."""
         return self._typed("⚙", "WATCHING", body, buttons=buttons)

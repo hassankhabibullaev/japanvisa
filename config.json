@@ -1,13 +1,9 @@
 {
-  "_README": "THE ONLY LINES YOU NORMALLY CHANGE ARE 'watch' AND 'groups'. 'watch' lists the calendars to monitor, using keys from 'targets' below. Each one alerts separately.",
-
+  "_README": "Change 'watch' to pick calendars (keys from 'targets'). poll_seconds_hot applies inside hot_hours_utc, _day inside day_hours_utc, _night otherwise. Times are UTC; Tashkent is UTC+5.",
   "watch": [
-    "coe_representative",
-    "coe_applicant"
+    "short_stay_representative",
+    "short_stay_applicant"
   ],
-
-  "groups": [4, 3],
-
   "targets": {
     "short_stay_representative": {
       "category": 12,
@@ -47,17 +43,21 @@
       "label": "With Government Documents - Applicant"
     }
   },
-
   "months_ahead": 2,
-
-  "poll_seconds_busy": 15,
-  "poll_seconds_quiet": 55,
-  "busy_hours_utc": [5, 12],
-
+  "poll_seconds_hot": 5,
+  "poll_seconds_day": 15,
+  "poll_seconds_night": 60,
+  "hot_hours_utc": [
+    13,
+    16
+  ],
+  "day_hours_utc": [
+    3,
+    18
+  ],
   "stale_read_warning_seconds": 180,
   "alarm_repeat_seconds": 10,
   "alarm_max_seconds": 900,
-
   "daily_report_hour_tashkent": 21,
   "run_minutes": 300
 }
