@@ -129,8 +129,14 @@ class Ntfy:
     def __init__(self, topic):
         self.topic = topic
 
-    def send(self, title, text, tries=3):
-        """Publish at max priority, then read the topic back to prove it exists."""
+    def send(self, title, text, tries=3, verify=True):
+        """Publish at max priority.
+
+        With verify=True the topic is read back and the message found before this
+        reports success -- an HTTP 200 alone is not proof of anything. Verifying
+        costs a second or two, so a ringing alarm checks the first round and every
+        tenth after that rather than every single buzz.
+        """
         last = "no attempt"
         for attempt in range(tries):
             try:
@@ -149,6 +155,8 @@ class Ntfy:
                 last = "publish returned no message id"
                 time.sleep(1 + attempt)
                 continue
+            if not verify:
+                return Delivery(True, "id %s, not re-checked this round" % ident, ident)
             if self._readback(ident):
                 return Delivery(True, "id %s, confirmed on server" % ident, ident)
             last = "id %s published but not found when reading the topic back" % ident
@@ -211,32 +219,41 @@ class Notifier:
         buttons = [[{"text": "STOP ALARM", "callback_data": "alarm_stop"}]]
 
         while time.time() - started < max_seconds:
+            round_start = time.time()
             rounds += 1
             head = text if rounds == 1 else "%s\n\n(reminder %d - press STOP ALARM)" % (text, rounds)
 
-            d = self.tg.send(head, buttons=buttons)
+            d = self.tg.send(head, buttons=buttons, tries=1 if rounds > 1 else 3)
             tg_ok = tg_ok or d.ok
             if not d.ok:
                 problems.append("telegram round %d: %s" % (rounds, d.detail))
             self.log("alarm round %d telegram: %s" % (rounds, d))
 
             if self.ntfy:
-                n = self.ntfy.send(title, text)
+                n = self.ntfy.send(title, text, tries=1 if rounds > 1 else 3,
+                                   verify=(rounds == 1 or rounds % 10 == 0))
                 ntfy_ok = ntfy_ok or n.ok
                 if not n.ok:
                     problems.append("ntfy round %d: %s" % (rounds, n.detail))
                 self.log("alarm round %d ntfy: %s" % (rounds, n))
 
-            # Wait out the interval, checking for the STOP button as we go.
-            waited = 0.0
-            while waited < repeat_seconds and time.time() - started < max_seconds:
-                for kind, value in self.tg.poll_replies():
-                    if value in self.STOP_WORDS:
-                        stopped_by = "you (%s)" % kind
-                        return self._alarm_result(started, rounds, tg_ok, ntfy_ok,
-                                                  problems, stopped_by)
-                time.sleep(1.5)
-                waited += 1.5
+            # Wait until the next round is due, watching for STOP as we go. This
+            # counts wall-clock from the start of the round, so sending time comes
+            # out of the interval instead of stretching it.
+            next_round = round_start + repeat_seconds
+            last_poll = 0.0
+            while True:
+                now = time.time()
+                if now >= next_round or now - started >= max_seconds:
+                    break
+                if now - last_poll >= 3:
+                    last_poll = now
+                    for kind, value in self.tg.poll_replies():
+                        if value in self.STOP_WORDS:
+                            stopped_by = "you (%s)" % kind
+                            return self._alarm_result(started, rounds, tg_ok, ntfy_ok,
+                                                      problems, stopped_by)
+                time.sleep(0.3)
 
         return self._alarm_result(started, rounds, tg_ok, ntfy_ok, problems, stopped_by)
 
