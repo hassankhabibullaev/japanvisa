@@ -39,23 +39,30 @@ of three. Every alert says which of them fits.
 
 A booking is **one time slot holding several applicants**, not several adjacent
 slots: you pick a time, then choose how many people. The day view offers **1 to 5
-applicants** in a single booking, so a group of three or four fits in one slot —
-if that slot has the seats free. This is read straight off the live page.
+applicants** in a single booking. This is read straight off the live page, and it
+matches a real booking made through this site in August 2026 in which five
+applicants went into a single appointment.
 
-**How many seats are left is not visible while everything is full.** Every day on
-this embassy's calendar is currently booked out, and a full slot shows only a
-crossed-out icon with no number. So the seat count has not been observed live
-here. What is known:
+So a group of four and a group of three each fit in one slot. Seven people do not,
+which is why two separate bookings are needed.
 
-- The booking system's own code filters slots by a hidden `data-stock` number when
-  you choose how many people are coming — so a per-slot count exists.
-- The identical software at another Japanese embassy prints the count as `残N件`
-  ("N remaining") right in the slot.
+**The number of seats left has never been observed live on this site.** Every day
+is currently booked out, and a full slot shows only a crossed-out icon with no
+number at all. Two things are nevertheless known about how the count is expressed:
 
-The monitor reads **both** forms. And if a slot ever opens showing neither, you
-still get the alert, worded "seats not stated" — an unreadable count is never a
-reason to stay quiet. The first real opening will show which form this embassy
-uses.
+- The booking system's own code hides slots whose hidden `data-stock` number is
+  below the number of people you selected — so a per-slot count exists.
+- The identical software at another Japanese embassy prints it in the slot as
+  `残N件`.
+
+The monitor reads **both** forms, and if a slot opens showing neither it still
+alerts, worded `seats not shown`. An unreadable count is never a reason to stay
+quiet. Until a real opening appears, treat any seat number in an alert as the
+site's claim rather than something this project has validated.
+
+> Anything in `tools/fixtures/*_open_*.html` is invented test data. The "3 seats"
+> in those files is a number typed into `tools/make_fixtures.py`, not a reading
+> from the embassy.
 
 The month grid never shows seat counts at all. That is why every day that looks
 open is opened up and read properly before you are told anything.
@@ -65,11 +72,30 @@ either group is logged and appears in the daily summary instead.
 
 ## How you are told
 
+A slot alert is three lines and nothing else, because it gets read half-awake on a
+lock screen:
+
+```
+REPRESENTATIVE SLOTS AVAILABLE
+2026-08-27 - 09:30 4 seats
+https://uzembassyryouji.rsvsys.jp/reservations/calendar
+```
+
+with a **STOP ALARM** button underneath. The first word is always the calendar, so
+Representative and Individual can never be confused. Tapping the ntfy notification
+opens the calendar directly.
+
 - **Slot found** → alarm on **Telegram and ntfy every 10 seconds**, about 90 times,
   until you press **STOP ALARM** in Telegram. It stops by itself after 15 minutes.
   The interval is `alarm_repeat_seconds` in `config.json`.
+- **Each buzz replaces the last one.** The new message is sent first, then the
+  previous one is deleted, so ninety buzzes leave exactly one message in the chat
+  and the alarm is never briefly absent. If a delete fails it is ignored — a stray
+  message is harmless and cannot stop the alarm. The final message is kept, so
+  there is always something to tap.
 - **Everything else** → Telegram only, never the alarm channel: warnings, crashes,
-  wrong-calendar alerts, and the daily summary at 21:00 Tashkent.
+  wrong-calendar alerts, and the daily summary at 21:00 Tashkent. These are never
+  deleted.
 
 A real ringing phone call is not possible here: every service that places one
 charges money, and this project is free with no card on file anywhere. A push

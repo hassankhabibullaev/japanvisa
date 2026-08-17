@@ -96,6 +96,18 @@ class Telegram:
 
         return Delivery(False, last)
 
+    def delete(self, message_id):
+        """Best effort. A message that will not delete is left alone, never fatal."""
+        if not message_id:
+            return False
+        try:
+            _, body = self._call("deleteMessage",
+                                 {"chat_id": self.chat_id, "message_id": message_id},
+                                 timeout=10)
+            return bool(body.get("ok"))
+        except Exception:
+            return False
+
     def poll_replies(self, timeout=2):
         """Recent button presses and messages, for the alarm snooze."""
         out = []
@@ -129,7 +141,7 @@ class Ntfy:
     def __init__(self, topic):
         self.topic = topic
 
-    def send(self, title, text, tries=3, verify=True):
+    def send(self, title, text, tries=3, verify=True, click=None):
         """Publish at max priority.
 
         With verify=True the topic is read back and the message found before this
@@ -140,11 +152,12 @@ class Ntfy:
         last = "no attempt"
         for attempt in range(tries):
             try:
-                status, raw = _req(
-                    "%s/%s" % (NTFY, self.topic),
-                    data=text.encode("utf-8"),
-                    headers={"Title": title, "Priority": "urgent", "Tags": "rotating_light"},
-                )
+                headers = {"Title": title, "Priority": "urgent",
+                           "Tags": "rotating_light"}
+                if click:
+                    headers["Click"] = click     # tapping the buzz opens the calendar
+                status, raw = _req("%s/%s" % (NTFY, self.topic),
+                                   data=text.encode("utf-8"), headers=headers)
                 ident = json.loads(raw).get("id")
             except Exception as e:
                 last = type(e).__name__
@@ -204,7 +217,7 @@ class Notifier:
 
     # -- the alarm --------------------------------------------------------
 
-    def alarm(self, title, text, repeat_seconds=60, max_seconds=900):
+    def alarm(self, title, text, repeat_seconds=60, max_seconds=900, click=None):
         """Ring both channels until acknowledged, and give up after max_seconds.
 
         Returns a dict describing what actually happened, including whether each
@@ -218,10 +231,12 @@ class Notifier:
 
         buttons = [[{"text": "STOP ALARM", "callback_data": "alarm_stop"}]]
 
+        previous = None      # the buzz we are about to replace
+
         while time.time() - started < max_seconds:
             round_start = time.time()
             rounds += 1
-            head = text if rounds == 1 else "%s\n\n(reminder %d - press STOP ALARM)" % (text, rounds)
+            head = text if rounds == 1 else "%s\n(%d)" % (text, rounds)
 
             d = self.tg.send(head, buttons=buttons, tries=1 if rounds > 1 else 3)
             tg_ok = tg_ok or d.ok
@@ -229,9 +244,18 @@ class Notifier:
                 problems.append("telegram round %d: %s" % (rounds, d.detail))
             self.log("alarm round %d telegram: %s" % (rounds, d))
 
+            # Send first, then remove the one before it. This way a failed send
+            # never leaves the chat with no alert in it, and ninety buzzes leave
+            # exactly one message behind.
+            if d.ok:
+                if previous:
+                    self.tg.delete(previous)
+                previous = d.ident
+
             if self.ntfy:
                 n = self.ntfy.send(title, text, tries=1 if rounds > 1 else 3,
-                                   verify=(rounds == 1 or rounds % 10 == 0))
+                                   verify=(rounds == 1 or rounds % 10 == 0),
+                                   click=click)
                 ntfy_ok = ntfy_ok or n.ok
                 if not n.ok:
                     problems.append("ntfy round %d: %s" % (rounds, n.detail))

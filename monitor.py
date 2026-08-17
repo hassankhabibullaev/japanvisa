@@ -150,40 +150,19 @@ def opening_key(opening):
 
 
 def describe(opening, cfg, tgt):
-    groups = sorted(cfg["groups"], reverse=True)
-    lines = ["%s SLOTS AVAILABLE" % tgt["headline"],
-             tgt["label"],
-             "",
-             "Date: %s" % opening["date"],
-             "Times:"]
+    """Three lines and nothing else: what opened, when and how big, where to go.
+
+    An alarm is read half-awake on a lock screen. Anything past the third line is
+    in the way.
+    """
+    when = []
     for sl in opening["slots"]:
-        lines.append("  - " + sl.describe())
-
-    known = [sl.seats for sl in opening["slots"] if sl.seats is not None]
-    lines.append("")
-    if known:
-        top = max(known)
-        lines.append("Most seats in one slot: %d" % top)
-        for g in groups:
-            lines.append("  group of %d: %s" % (g, "FITS" if top >= g else "does not fit"))
-        if len(groups) > 1 and len(known) >= 2:
-            two = sorted(known, reverse=True)[:2]
-            total = sum(groups)
-            lines.append("  both groups (%d people): %s"
-                         % (total, "possible across two slots (%d + %d seats)" % (two[0], two[1])
-                            if two[0] >= groups[0] and two[1] >= groups[1]
-                            else "not from what is open here"))
-    else:
-        lines.append("The site did not state seat counts on this day.")
-        lines.append("Alerting anyway rather than guessing - check it yourself.")
-
-    if opening.get("max_group"):
-        lines.append("")
-        lines.append("Site allows up to %d applicants in one booking."
-                     % opening["max_group"])
-    lines.append("")
-    lines.append("https://uzembassyryouji.rsvsys.jp/reservations/calendar")
-    return "\n".join(lines)
+        if sl.seats is None:
+            when.append("%s seats not shown" % sl.time)
+        else:
+            when.append("%s %d seat%s" % (sl.time, sl.seats, "" if sl.seats == 1 else "s"))
+    return "%s SLOTS AVAILABLE\n%s - %s\n%s" % (
+        tgt["headline"], opening["date"], " | ".join(when), visasite.CALENDAR_PAGE)
 
 
 # --------------------------------------------------------------------------
@@ -263,7 +242,8 @@ def alert_openings(cfg, notifier, state, tgt, openings):
             continue
         text = describe(op, cfg, tgt)
         result = notifier.alarm("%s slots available" % tgt["headline"], text,
-                                cfg["alarm_repeat_seconds"], cfg["alarm_max_seconds"])
+                                cfg["alarm_repeat_seconds"], cfg["alarm_max_seconds"],
+                                click=visasite.CALENDAR_PAGE)
         state.data["alerted"][seen_key] = key
         state.data["found"].append({
             "calendar": tgt["headline"],
