@@ -382,8 +382,9 @@ def main():
     state = State(args.state)
     minutes = args.minutes if args.minutes is not None else cfg["run_minutes"]
     deadline = time.time() + minutes * 60
-    log("monitor starting: %s, %d months, poll %ss/%ss"
-        % (cfg["_target"]["label"], cfg["months_ahead"] + 1,
+    log("monitor starting: watching %s | groups %s | %d months | poll %ss/%ss"
+        % (", ".join(t["headline"] for t in cfg["_targets"]),
+           cfg["groups"], cfg["months_ahead"] + 1,
            cfg["poll_seconds_busy"], cfg["poll_seconds_quiet"]))
     try:
         run(cfg, notifier, state, deadline)
