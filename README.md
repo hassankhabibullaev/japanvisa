@@ -148,6 +148,15 @@ It runs itself on GitHub Actions, free, on this public repository:
 Three repository secrets are required: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
 `NTFY_TOPIC`.
 
+**Changing `config.json` does not take effect immediately.** A run picks up the
+code it started with and then watches for five hours, so an edit waits for the
+current run to finish. To apply it now, cancel the running job — the queued run
+starts within seconds with the new settings:
+
+```bash
+gh run cancel $(gh run list --workflow=monitor.yml --status in_progress --limit 1 --json databaseId --jq '.[0].databaseId') && gh workflow run monitor.yml
+```
+
 ## Checking it yourself
 
 ```bash
