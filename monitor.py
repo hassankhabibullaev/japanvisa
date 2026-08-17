@@ -462,6 +462,7 @@ def main():
         return 0
 
     state = State(args.state)
+    log("discarded %d stale Telegram updates" % notifier.tg.drain())
     notifier.tg.register_commands([
         ("watch", "Change which calendars are watched"),
         ("status", "What it is watching and today's counts"),

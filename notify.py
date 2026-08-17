@@ -117,6 +117,21 @@ class Telegram:
         except Exception:
             return False
 
+    def drain(self):
+        """Throw away anything already queued, without acting on it.
+
+        Telegram keeps undelivered updates for about a day. Without this, a run
+        starting up would replay button presses from hours ago -- re-announcing a
+        switch that was made and forgotten long before.
+        """
+        dropped = 0
+        while True:
+            batch = self.poll_replies()
+            dropped += len(batch)
+            if len(batch) < 100:
+                break
+        return dropped
+
     def poll_replies(self, timeout=2):
         """Recent button presses and messages, for the alarm snooze."""
         out = []
