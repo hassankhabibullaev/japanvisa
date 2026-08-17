@@ -1,0 +1,54 @@
+{
+  "_README": "THE ONLY LINE YOU NORMALLY CHANGE IS 'target'. Set it to one of the keys under 'targets'.",
+
+  "target": "short_stay_representative",
+
+  "targets": {
+    "short_stay_representative": {
+      "category": 12,
+      "event": 21,
+      "label": "Short stay - Representative or Travel Agency"
+    },
+    "short_stay_applicant": {
+      "category": 12,
+      "event": 20,
+      "label": "Short stay - Applicant (testing only)"
+    },
+    "coe_representative": {
+      "category": 15,
+      "event": 17,
+      "label": "With COE - Representative"
+    },
+    "coe_applicant": {
+      "category": 15,
+      "event": 22,
+      "plan": 14,
+      "label": "With COE - Applicant"
+    },
+    "govdocs_representative": {
+      "category": 16,
+      "event": 18,
+      "label": "With Government Documents - Representative"
+    },
+    "govdocs_applicant": {
+      "category": 16,
+      "event": 23,
+      "label": "With Government Documents - Applicant"
+    }
+  },
+
+  "group_size": 4,
+  "min_useful_seats": 3,
+  "months_ahead": 2,
+
+  "poll_seconds_busy": 15,
+  "poll_seconds_quiet": 55,
+  "busy_hours_utc": [5, 12],
+
+  "stale_read_warning_seconds": 180,
+  "alarm_repeat_seconds": 60,
+  "alarm_max_seconds": 900,
+
+  "daily_summary_hour_tashkent": 21,
+  "run_minutes": 300
+}

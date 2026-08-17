@@ -1,4 +1,5 @@
 .env
-state.json
-artifacts/
 __pycache__/
+artifacts/
+state.json
+state.json.tmp

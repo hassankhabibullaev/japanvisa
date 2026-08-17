@@ -1,0 +1,46 @@
+name: watchdog
+
+# Answers one question every 10 minutes: is the monitor actually running?
+# If it is not, it says so on Telegram and starts it again. This is what turns a
+# dead runner from silence into a message.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is the monitor alive?
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPO: ${{ github.repository }}
+        run: |
+          alive=$(gh run list --workflow=monitor.yml --repo "$REPO" \
+                    --status in_progress --limit 1 --json databaseId --jq 'length')
+          queued=$(gh run list --workflow=monitor.yml --repo "$REPO" \
+                    --status queued --limit 1 --json databaseId --jq 'length')
+          echo "in_progress=$alive queued=$queued"
+          if [ "$alive" = "0" ] && [ "$queued" = "0" ]; then
+            python3 - <<'PY'
+          import os, urllib.parse, urllib.request
+          url = "https://api.telegram.org/bot%s/sendMessage" % os.environ["TELEGRAM_BOT_TOKEN"]
+          text = ("MONITOR IS NOT RUNNING.\n\n"
+                  "No monitor run is active or queued. The watchdog is starting one now.\n"
+                  "If you get this repeatedly, something is wrong with the workflow itself.")
+          data = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode()
+          urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20).read()
+          PY
+            gh workflow run monitor.yml --repo "$REPO"
+          fi

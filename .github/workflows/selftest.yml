@@ -1,0 +1,72 @@
+name: weekly-selftest
+
+# Once a week, fire a real alert through the real alarm path on both channels and
+# report whether it could be confirmed. Press STOP ALARM to end it; it stops by
+# itself after 3 minutes either way.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"   # Mondays 05:00 UTC = 10:00 Tashkent
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # GitHub switches scheduled workflows off after 60 days with no repository
+      # activity. A weekly empty commit keeps the monitor from being quietly
+      # turned off while nobody is looking.
+      - name: Keep scheduled workflows enabled
+        run: |
+          git config user.name "visa-monitor"
+          git config user.email "visa-monitor@users.noreply.github.com"
+          git commit --allow-empty -m "weekly keepalive $(date -u +%Y-%m-%d)"
+          git push
+
+      - name: Check the live site is still readable and the target still switches
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python3 monitor.py --once
+
+      - name: Replay a known open page through the real detection path
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          python3 tools/make_fixtures.py >/dev/null
+          python3 tools/replay.py tools/fixtures/month_one_open.html \
+                                  tools/fixtures/day_open_stock.html >/dev/null
+
+      - name: Ring both channels for real
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python3 monitor.py --selftest
+
+      - name: Say so if the self-test itself broke
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import os, urllib.parse, urllib.request
+          url = "https://api.telegram.org/bot%s/sendMessage" % os.environ["TELEGRAM_BOT_TOKEN"]
+          text = ("WEEKLY SELF-TEST FAILED.\n\n"
+                  "Either the live site check, the detection replay, or the alarm could not "
+                  "be confirmed. The monitor may be watching the wrong thing or unable to "
+                  "reach you.\n"
+                  "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          data = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode()
+          urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20).read()
+          PY

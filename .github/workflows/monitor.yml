@@ -1,0 +1,62 @@
+name: monitor
+
+# Runs continuously. Each run watches for a few hours, then exits cleanly and the
+# next run takes over. The schedule is the safety net that restarts the chain if a
+# runner dies; the watchdog workflow shouts if that ever fails.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: visa-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore today's counters
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: visa-state-
+          restore-keys: visa-state-
+
+      - name: Watch the calendar
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python3 monitor.py
+
+      - name: Save today's counters
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: visa-state-${{ github.run_id }}
+
+      - name: Say so if this run died
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import os, urllib.parse, urllib.request
+          url = "https://api.telegram.org/bot%s/sendMessage" % os.environ["TELEGRAM_BOT_TOKEN"]
+          text = ("MONITOR RUN FAILED on GitHub Actions.\n"
+                  "It is not watching right now. A new run should start within 15 minutes; "
+                  "the watchdog will complain if it does not.\n"
+                  "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          data = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode()
+          urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20).read()
+          PY
