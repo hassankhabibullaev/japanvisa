@@ -32,8 +32,23 @@ Change **two lines** in `config.json` and nothing else:
 | `govdocs_representative` | with Government Documents, Representative |
 | `govdocs_applicant` | with Government Documents, Applicant |
 
-`groups` is the sizes you need to seat — `[4, 3]` for one group of four and one
-of three. Every alert says which of them fits.
+`groups` is the sizes you need to seat — `[4, 3]` for one group of four and one of
+three. It is used to decide what is worth waking you for, not shown in alerts.
+
+### Changing it from Telegram
+
+You do not need to touch the file. In the bot:
+
+| send | what happens |
+| --- | --- |
+| `/watch` | shows buttons for every combination; tap one to switch |
+| `/status` | what it is watching, plus today's counts |
+| `/stop` | stops a ringing alarm |
+
+The choice is remembered across restarts and takes effect on the next poll, within
+about 15 seconds. It overrides `config.json` until you pick something else.
+Switching to **COE** is the easy way to get a real alert, since COE opens more
+often than the short-stay Representative calendar.
 
 ## How capacity works on this site
 
@@ -72,18 +87,35 @@ either group is logged and appears in the daily summary instead.
 
 ## How you are told
 
-A slot alert is three lines and nothing else, because it gets read half-awake on a
-lock screen:
+Every message starts with an icon and a word saying what kind of message it is, so
+an alarm never looks like a status update:
+
+| header | means |
+| --- | --- |
+| 🔔 **… SLOTS AVAILABLE** | act now — this one rings |
+| ⚠️ **WARNING** | still running, but something is off |
+| 🛑 **PROBLEM** | wrong calendar, or it cannot trust what it read |
+| ℹ️ **STATUS** | routine information, recovery, a setting changed |
+| 📊 **DAILY SUMMARY** | 21:00 Tashkent wrap-up |
+| 💥 **MONITOR STOPPED** | it crashed; a new run takes over |
+| 🧪 **SELF-TEST** | the weekly end-to-end check |
+
+A slot alert is the calendar, the dates, and the link. No times, no seat counts —
+they are on the site, one tap away:
 
 ```
-REPRESENTATIVE SLOTS AVAILABLE
-2026-08-27 - 09:30 4 seats
+🔔  REPRESENTATIVE SLOTS AVAILABLE
+──────────────────────
+
+Thu, 27 August 2026
+Fri, 28 August 2026
+
 https://uzembassyryouji.rsvsys.jp/reservations/calendar
 ```
 
-with a **STOP ALARM** button underneath. The first word is always the calendar, so
-Representative and Individual can never be confused. Tapping the ntfy notification
-opens the calendar directly.
+with a **STOP ALARM** button underneath. Tapping the ntfy notification opens the
+calendar directly. If several days open at once they go in **one** alarm — three
+open days used to mean three alarms queued back to back.
 
 - **Slot found** → alarm on **Telegram and ntfy every 10 seconds**, about 90 times,
   until you press **STOP ALARM** in Telegram. It stops by itself after 15 minutes.

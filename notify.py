@@ -96,6 +96,15 @@ class Telegram:
 
         return Delivery(False, last)
 
+    def register_commands(self, commands):
+        """Put the commands in Telegram's own menu. Best effort; cosmetic only."""
+        try:
+            self._call("setMyCommands", {"commands": json.dumps(
+                [{"command": c, "description": d} for c, d in commands])})
+            return True
+        except Exception:
+            return False
+
     def delete(self, message_id):
         """Best effort. A message that will not delete is left alone, never fatal."""
         if not message_id:
@@ -126,8 +135,7 @@ class Telegram:
             if cq:
                 out.append(("callback", (cq.get("data") or "").strip().lower()))
                 try:
-                    self._call("answerCallbackQuery",
-                               {"callback_query_id": cq["id"], "text": "Alarm stopped."})
+                    self._call("answerCallbackQuery", {"callback_query_id": cq["id"]})
                 except Exception:
                     pass
                 continue
@@ -199,9 +207,21 @@ class Ntfy:
 
 
 class Notifier:
-    """The only thing the monitor talks to."""
+    """The only thing the monitor talks to.
+
+    Every message carries a header saying what kind of message it is, so an alarm,
+    a warning and a routine status update never look alike at a glance.
+    """
 
     STOP_WORDS = {"stop", "snooze", "/stop", "ok", "seen", "alarm_stop"}
+
+    ALARM = "\U0001F514"      # bell
+    WARNING = "⚠️"  # warning triangle
+    ERROR = "\U0001F6D1"      # stop sign
+    STATUS = "ℹ️"   # information
+    SUMMARY = "\U0001F4CA"    # bar chart
+    CRASH = "\U0001F4A5"      # collision
+    TEST = "\U0001F9EA"       # test tube
 
     def __init__(self, telegram, ntfy=None, log=print):
         self.tg = telegram
@@ -210,10 +230,36 @@ class Notifier:
 
     # -- routine, Telegram only -------------------------------------------
 
-    def notice(self, text):
-        d = self.tg.send(text)
-        self.log("telegram notice: %s" % d)
+    def _typed(self, icon, kind, body, buttons=None):
+        text = "%s  %s\n%s\n\n%s" % (icon, kind, "─" * 22, body.strip())
+        d = self.tg.send(text, buttons=buttons)
+        self.log("telegram %s: %s" % (kind.lower(), d))
         return d
+
+    def warn(self, body):
+        return self._typed(self.WARNING, "WARNING", body)
+
+    def error(self, body):
+        return self._typed(self.ERROR, "PROBLEM", body)
+
+    def status(self, body):
+        return self._typed(self.STATUS, "STATUS", body)
+
+    def summary(self, body):
+        return self._typed(self.SUMMARY, "DAILY SUMMARY", body)
+
+    def crash(self, body):
+        return self._typed(self.CRASH, "MONITOR STOPPED", body)
+
+    def test(self, body):
+        return self._typed(self.TEST, "SELF-TEST", body)
+
+    def menu(self, body, buttons):
+        return self._typed(self.STATUS, "CHANGE WHAT IS WATCHED", body, buttons=buttons)
+
+    # Kept so older call sites keep working; routine information.
+    def notice(self, text):
+        return self.status(text)
 
     # -- the alarm --------------------------------------------------------
 
@@ -236,7 +282,8 @@ class Notifier:
         while time.time() - started < max_seconds:
             round_start = time.time()
             rounds += 1
-            head = text if rounds == 1 else "%s\n(%d)" % (text, rounds)
+            body = "%s  %s\n%s\n\n%s" % (self.ALARM, title.upper(), "─" * 22, text)
+            head = body if rounds == 1 else "%s\n\n(still ringing - %d)" % (body, rounds)
 
             d = self.tg.send(head, buttons=buttons, tries=1 if rounds > 1 else 3)
             tg_ok = tg_ok or d.ok
@@ -294,8 +341,9 @@ class Notifier:
 
         # If a channel never confirmed, say so on the channel that did.
         if not ntfy_ok and self.ntfy and tg_ok:
-            self.tg.send("Heads up: the ntfy alarm could NOT be confirmed just now.\n"
-                         "Telegram worked. Reason: %s" % (problems[-1] if problems else "unknown"))
+            self.warn("The ntfy alarm could NOT be confirmed just now.\n"
+                      "Telegram worked, so you are reading this.\n\nReason: %s"
+                      % (problems[-1] if problems else "unknown"))
         return result
 
 
