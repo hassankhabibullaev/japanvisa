@@ -15,6 +15,7 @@ Two rules live in this file and nowhere else:
 import http.cookiejar
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -152,12 +153,12 @@ def parse_day(html):
         tm = re.search(r"<th[^>]*>\s*(\d{1,2}:\d{2})\s*</th>", row)
         if not tm:
             continue
-        time = tm.group(1)
+        when = tm.group(1)
         seats = seats_in(row)
 
         # Explicitly closed: the disabled class, the disabled icon, or a stated zero.
         if ("c_cal_time_cell--disabled" in row or "icon_disabled" in row or seats == 0):
-            slots.append(Slot(time, False, 0))
+            slots.append(Slot(when, False, 0))
             continue
 
         # Anything else that is a slot cell at all counts as available. That
@@ -170,7 +171,7 @@ def parse_day(html):
 
         if seats is not None or clickable or has_icon or is_cell:
             note = "" if seats is not None else "site did not state a seat count"
-            slots.append(Slot(time, True, seats, note))
+            slots.append(Slot(when, True, seats, note))
     return slots
 
 
@@ -198,33 +199,45 @@ class Site:
         self.plan = None
 
     # -- raw transport -----------------------------------------------------
+    #
+    # This site answers HTTP 500 for roughly one request in thirteen, worst
+    # during the hours slots are released. That is weather, not an outage, so a
+    # single request retries a few times over a handful of seconds rather than
+    # letting a routine 500 become a failed check.
+
+    RETRY_PAUSES = (1, 2, 2)      # ~5 seconds of trying, then give up and report
+
+    def _attempt(self, make_request, describe):
+        last = None
+        for i in range(len(self.RETRY_PAUSES) + 1):
+            try:
+                with self.opener.open(make_request(), timeout=self.timeout) as r:
+                    return r.read().decode("utf-8", "replace")
+            except urllib.error.HTTPError as e:
+                last = "HTTP %s%s" % (e.code, describe)
+            except Exception as e:
+                last = "%s%s" % (type(e).__name__, describe)
+            if i < len(self.RETRY_PAUSES):
+                time.sleep(self.RETRY_PAUSES[i])
+        raise FetchFailed(last)
 
     def _get(self, url):
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
-        try:
-            with self.opener.open(req, timeout=self.timeout) as r:
-                return r.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            raise FetchFailed("HTTP %s on GET" % e.code)
-        except Exception as e:
-            raise FetchFailed("%s on GET" % type(e).__name__)
+        return self._attempt(
+            lambda: urllib.request.Request(url, headers={"User-Agent": UA}), " on GET")
 
     def _post(self, fields):
         body = urllib.parse.urlencode(fields).encode()
-        req = urllib.request.Request(CALENDAR_AJAX, data=body, headers={
-            "User-Agent": UA,
-            "X-Requested-With": "XMLHttpRequest",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "Referer": CALENDAR_PAGE,
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-        })
-        try:
-            with self.opener.open(req, timeout=self.timeout) as r:
-                raw = r.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            raise FetchFailed("HTTP %s" % e.code)
-        except Exception as e:
-            raise FetchFailed("%s" % type(e).__name__)
+
+        def build():
+            return urllib.request.Request(CALENDAR_AJAX, data=body, headers={
+                "User-Agent": UA,
+                "X-Requested-With": "XMLHttpRequest",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Referer": CALENDAR_PAGE,
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+            })
+
+        raw = self._attempt(build, "")
         try:
             return json.loads(raw).get("html", "")
         except ValueError:
