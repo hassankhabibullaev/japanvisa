@@ -25,8 +25,26 @@ jobs:
           PAGE=BASE+"/reservations/calendar"; AJAX=BASE+"/ajax/reservations/calendar"
           UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
           jar=http.cookiejar.CookieJar(); op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-          html=op.open(urllib.request.Request(PAGE,headers={'User-Agent':UA}),timeout=30).read().decode('utf-8','replace')
-          tok=re.search(r'name="_csrfToken"[^>]*value="([^"]+)"',html).group(1)
+          # Measure the plain page load too: that is what a person opening the
+          # site experiences, before any of our machinery is involved.
+          pc=collections.Counter(); pseq=[]; tok=None
+          for i in range(12):
+              try:
+                  h=op.open(urllib.request.Request(PAGE,headers={'User-Agent':UA}),timeout=30).read().decode('utf-8','replace')
+                  pc[200]+=1; pseq.append(".")
+                  m=re.search(r'name="_csrfToken"[^>]*value="([^"]+)"',h)
+                  if m: tok=m.group(1)
+              except urllib.error.HTTPError as e:
+                  pc[e.code]+=1; pseq.append("X")
+              except Exception as e:
+                  pc[type(e).__name__]+=1; pseq.append("?")
+              time.sleep(2)
+          pn=sum(pc.values())
+          print("GITHUB pageload codes:", dict(pc))
+          print("GITHUB pageload sequence:", "".join(pseq))
+          print("GITHUB pageload error rate: %.0f%%" % (100*(pn-pc[200])/pn))
+          if not tok:
+              print("GITHUB could not obtain a token at all"); raise SystemExit(0)
           codes=collections.Counter(); seq=[]
           body=urllib.parse.urlencode([('category','12'),('event','21'),('plan','20'),
               ('date','2026/08/01'),('disp_type','month'),('_csrfToken',tok),('search','exec')]).encode()
