@@ -60,14 +60,16 @@ def months_to_scan(count, now=None):
 
 class State:
     FRESH_DAY = {"checks": 0, "failures": 0, "wrong_calendar": 0,
-                 "found": [], "alerted": {}, "events": [], "transitions": []}
+                 "found": [], "events": [], "transitions": []}
 
     def __init__(self, path):
         self.path = path
-        # "seen" is the calendar's own state, not a daily tally, so it must not
-        # be cleared at midnight or every day would start by re-reporting itself.
+        # "seen" and "alerted" describe the calendar, not the day's tally, so
+        # neither may be cleared at midnight. Clearing "alerted" is what made six
+        # still-open days ring again at 00:00 Tashkent, waking someone for news
+        # they already had.
         self.data = {"date": None, "summary_sent_for": None, "watch_override": None,
-                     "seen": {}}
+                     "seen": {}, "alerted": {}}
         self.data.update(dict(self.FRESH_DAY))
         self.load()
 
@@ -98,8 +100,15 @@ class State:
         except Exception as e:
             log("could not save state: %s" % e)
 
+    def prune_alerted(self, today):
+        """Forget dates that have already passed, so the record cannot grow forever."""
+        alerted = self.data.get("alerted") or {}
+        for k in [k for k in alerted if k.rsplit("|", 1)[-1] < today]:
+            del alerted[k]
+
     def roll_day(self, today):
         if self.data.get("date") != today:
+            self.prune_alerted(today)
             self.data["date"] = today
             self.data.update({k: (list(v) if isinstance(v, list) else
                                   dict(v) if isinstance(v, dict) else v)
@@ -202,9 +211,15 @@ TRANSITIONS = {
     ("none", "full"): "opened and was taken before we saw it",
     ("none", "open"): "OPENED",
     ("full", "open"): "seats freed up",
+    ("waitlist", "open"): "SEATS RELEASED off the waiting list",
     ("open", "full"): "filled up",
     ("open", "none"): "withdrawn",
     ("full", "none"): "reception withdrawn",
+    ("none", "waitlist"): "waiting list opened (no seats to book)",
+    ("full", "waitlist"): "moved to waiting list (no seats to book)",
+    ("open", "waitlist"): "seats gone, waiting list only",
+    ("waitlist", "full"): "waiting list closed",
+    ("waitlist", "none"): "waiting list withdrawn",
 }
 
 
@@ -663,6 +678,14 @@ def daily_report_text(cfg, state, today, check):
         for t in trans[-10:]:
             L.append("   %s  %s  %s" % (t["at"], pretty_date(t["date"]), t["what"]))
     L.append("")
+
+    waiting = sorted({d for st in (d.get("seen") or {}).values()
+                      for d, v in st.items() if v == "waitlist"})
+    if waiting:
+        L.append("\U0001F7E6 WAITING LIST (no seats to book)")
+        for date in waiting[:8]:
+            L.append("   %s" % pretty_date(date))
+        L.append("")
 
     L.append("\U0001F50D ACTIVITY")
     L.append("   %s checks" % d.get("checks", 0))

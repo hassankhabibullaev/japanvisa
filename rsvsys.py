@@ -65,8 +65,9 @@ def _cells(html):
 class Day:
     """One square on the month grid."""
 
-    OPEN = "open"          # bookable: clickable, and not the disabled icon
+    OPEN = "open"          # bookable right now
     FULL = "full"          # reception happens, no seats left
+    WAITLIST = "waitlist"  # zero seats, but you may queue for a cancellation
     NONE = "none"          # no reception that day
     UNKNOWN = "unknown"    # a shape we do not recognise -- always escalated
 
@@ -128,10 +129,18 @@ def parse_month(html, year=None, mon=None):
             date = "%04d-%02d-%02d" % (year, mon, daynum)
 
         icons = set(re.findall(r"(icon_[a-z_]+)\.svg", cell))
+        waiting = "icon_square" in icons or "cancel_wait" in cell or "cancel-wait" in cell
+
         if not icons:
             days.append(Day(date, Day.NONE))
         elif "icon_disabled" in icons:
             days.append(Day(date, Day.FULL))
+        elif waiting:
+            # A square is the cancellation waiting list: the day view shows
+            # data-stock="0", so there is nothing to book. It appeared on this
+            # site for the first time on 18 August 2026 and, being merely "not
+            # the disabled icon", was read as bookable and rang all night.
+            days.append(Day(date, Day.WAITLIST))
         else:
             # icon_circle, or a shape we have not met. Both mean "look at it".
             note = "" if icons == {"icon_circle"} else "unfamiliar icon %s" % sorted(icons)
