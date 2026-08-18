@@ -1,0 +1,48 @@
+name: sitecheck
+
+# Temporary diagnostic: measure the site's error rate from a different network,
+# to tell "the site is broken" apart from "our address is being punished".
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe from GitHub's address
+        run: |
+          curl -s ifconfig.me || true
+          echo ""
+          python3 - <<'PY'
+          import re, time, collections, urllib.request, urllib.parse, urllib.error, http.cookiejar
+          BASE="https://uzembassyryouji.rsvsys.jp"
+          PAGE=BASE+"/reservations/calendar"; AJAX=BASE+"/ajax/reservations/calendar"
+          UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          jar=http.cookiejar.CookieJar(); op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+          html=op.open(urllib.request.Request(PAGE,headers={'User-Agent':UA}),timeout=30).read().decode('utf-8','replace')
+          tok=re.search(r'name="_csrfToken"[^>]*value="([^"]+)"',html).group(1)
+          codes=collections.Counter(); seq=[]
+          body=urllib.parse.urlencode([('category','12'),('event','21'),('plan','20'),
+              ('date','2026/08/01'),('disp_type','month'),('_csrfToken',tok),('search','exec')]).encode()
+          for i in range(24):
+              req=urllib.request.Request(AJAX,data=body,headers={'User-Agent':UA,
+                  'X-Requested-With':'XMLHttpRequest','Referer':PAGE,
+                  'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'})
+              try:
+                  r=op.open(req,timeout=30); r.read(); codes[r.status]+=1; seq.append(".")
+              except urllib.error.HTTPError as e:
+                  codes[e.code]+=1; seq.append("X")
+              except Exception as e:
+                  codes[type(e).__name__]+=1; seq.append("?")
+              time.sleep(2)
+          n=sum(codes.values())
+          print("GITHUB codes:", dict(codes))
+          print("GITHUB sequence:", "".join(seq))
+          print("GITHUB error rate: %.0f%%" % (100*(n-codes[200])/n))
+          PY
