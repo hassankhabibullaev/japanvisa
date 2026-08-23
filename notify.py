@@ -218,6 +218,13 @@ class Ntfy:
         return False
 
 
+def _summarise(body, width=70):
+    """The first couple of meaningful lines, for a one-line log entry."""
+    lines = [l.strip() for l in body.strip().splitlines() if l.strip()]
+    lines = [l for l in lines if not l.startswith("http")]
+    return "  ".join(lines[:2])[:width]
+
+
 class Notifier:
     """The only thing the monitor talks to.
 
@@ -242,16 +249,33 @@ class Notifier:
         self._alarms = {}             # key -> {thread, stop}
         self._finished = []
         self._alarm_lock = threading.Lock()
+        # Every outbound message is written down here with the second it was
+        # sent. Alarm buzzes delete themselves as they go, so without this there
+        # is no way afterwards to tell which message came first.
+        self._journal = []
 
-    def _typed(self, icon, kind, body, buttons=None):
+    def note(self, kind, what, detail=""):
+        """Write one line into the journal, with the moment it happened."""
+        with self._alarm_lock:
+            self._journal.append({"t": time.time(), "kind": kind,
+                                  "what": what, "detail": detail})
+
+    def take_journal(self):
+        with self._alarm_lock:
+            out, self._journal = self._journal, []
+        return out
+
+    def _typed(self, icon, kind, body, buttons=None, journal_as=None):
         text = "%s %s\n%s\n%s" % (icon, kind, self.RULE, body.strip())
         d = self.tg.send(text, buttons=buttons)
         self.log("telegram %s: %s" % (kind.lower(), d))
+        if journal_as:
+            self.note(journal_as, _summarise(body), "" if d.ok else "SEND FAILED")
         return d
 
     def report(self, body, title="DAILY REPORT"):
         """The one scheduled message: what happened today and whether it is well."""
-        return self._typed(self.REPORT, title, body)
+        return self._typed(self.REPORT, title, body, journal_as="REPORT")
 
     def attention(self, headline, body, throttle_key=None, throttle_seconds=1800):
         """Something a human should know about, now.
@@ -268,7 +292,7 @@ class Notifier:
                 return Delivery(True, "throttled")
             self._last_sent[throttle_key] = time.time()
         return self._typed(self.ATTENTION, "NEEDS ATTENTION",
-                           "%s\n\n%s" % (headline, body))
+                           "%s\n\n%s" % (headline, body), journal_as="PROBLEM")
 
     def changed(self, body, throttle_key="changed", throttle_seconds=20):
         """A release happened but the seats are already gone.
@@ -280,7 +304,8 @@ class Notifier:
         if time.time() - last < throttle_seconds:
             return Delivery(True, "throttled")
         self._last_sent[throttle_key] = time.time()
-        return self._typed("\U0001F440", "CALENDAR CHANGED", body)
+        return self._typed("\U0001F440", "CALENDAR CHANGED", body,
+                           journal_as="CHANGED")
 
     def menu(self, body, buttons):
         """Only ever shown because you asked for it."""
@@ -296,19 +321,28 @@ class Notifier:
     # other calendar may be about to open too. Alarms now ring on their own
     # threads and the loop carries on.
 
-    def ring(self, key, title, text, repeat_seconds, max_seconds, click=None):
+    def ring(self, key, title, text, repeat_seconds, max_seconds, click=None,
+             subject=""):
         """Start an alarm for `key` in the background. No-op if already ringing."""
         with self._alarm_lock:
             live = self._alarms.get(key)
             if live and live["thread"].is_alive():
                 self.log("alarm '%s' already ringing" % key)
+                self._journal.append({"t": time.time(), "kind": "ALARM REPEAT",
+                                      "what": subject or key,
+                                      "detail": "already ringing since %s"
+                                                % time.strftime("%H:%M:%S", time.gmtime(
+                                                    live["started"] + 5 * 3600))})
                 return False
             stop = threading.Event()
             t = threading.Thread(
                 target=self._ring_worker,
                 args=(key, stop, title, text, repeat_seconds, max_seconds, click),
                 daemon=True)
-            self._alarms[key] = {"thread": t, "stop": stop}
+            self._alarms[key] = {"thread": t, "stop": stop, "started": time.time(),
+                                 "subject": subject or key}
+            self._journal.append({"t": time.time(), "kind": "ALARM START",
+                                  "what": subject or key, "detail": ""})
         t.start()
         return True
 
@@ -322,15 +356,25 @@ class Notifier:
                       "stopped_by": "error"}
         result["key"] = key
         with self._alarm_lock:
+            # "you" is the default for a stop event; the real reason is recorded
+            # by whoever set it, so a slot vanishing is not logged as a person.
+            if result["stopped_by"] == "you":
+                result["stopped_by"] = self._alarms.get(key, {}).get("reason", "you")
             self._finished.append(result)
+            self._journal.append({
+                "t": time.time(), "kind": "ALARM STOP",
+                "what": self._alarms.get(key, {}).get("subject", key),
+                "detail": "%d rings, ended by %s" % (result["rounds"],
+                                                     result["stopped_by"])})
 
-    def stop_ringing(self, key=None):
+    def stop_ringing(self, key=None, reason="you"):
         """Silence one alarm, or all of them when key is None."""
         stopped = []
         with self._alarm_lock:
             for k, a in self._alarms.items():
                 if (key is None or k == key) and a["thread"].is_alive():
                     a["stop"].set()
+                    a["reason"] = reason
                     stopped.append(k)
         return stopped
 

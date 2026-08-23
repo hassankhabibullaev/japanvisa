@@ -39,6 +39,7 @@ You do not need to touch the file. In the bot:
 | --- | --- |
 | `/watch` | shows buttons for every combination; tap one to switch |
 | `/status` | today's full report, on demand |
+| `/log` | every notification sent, timed to the second |
 | `/stop` | stops a ringing alarm |
 
 The choice is remembered across restarts and takes effect on the next poll, within
@@ -152,6 +153,24 @@ messages. Crucially the alarms ring on their own threads, so **watching never
 pauses while something is ringing** — previously an alarm blocked the monitor for
 up to fifteen minutes, which meant the moment a slot opened was exactly the moment
 it stopped looking for the next one.
+
+An alarm **stops by itself the moment the slot disappears**. A day that opens and
+is withdrawn within one check used to leave the phone ringing for the full fifteen
+minutes, long after there was anything to book. If the same date genuinely
+re-opens later, it rings again.
+
+Because each buzz deletes the one before it, there is no way afterwards to tell
+whether the alarm or the "it is gone" message came first. `/log` answers that:
+
+```
+📊 NOTIFICATION LOG
+────────────
+23 August 2026
+18:17:25  🔔 ALARM START   REPRESENTATIVE  3 September 2026
+18:17:37  👀 CHANGED       REPRESENTATIVE  3 September 2026 - seats gone, waiting list only
+18:17:39  🔕 ALARM STOP    REPRESENTATIVE  3 September 2026
+           2 rings, ended by the slot disappeared
+```
 
 **2. 👀 CALENDAR CHANGED** — Telegram only, no ringing. A day appearing or closing
 without ever being catchable, which is what a release taken inside a minute looks

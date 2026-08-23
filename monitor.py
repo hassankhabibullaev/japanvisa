@@ -69,7 +69,7 @@ class State:
         # still-open days ring again at 00:00 Tashkent, waking someone for news
         # they already had.
         self.data = {"date": None, "summary_sent_for": None, "watch_override": None,
-                     "seen": {}, "alerted": {}}
+                     "seen": {}, "alerted": {}, "notifications": [], "ringing_for": {}}
         self.data.update(dict(self.FRESH_DAY))
         self.load()
 
@@ -311,6 +311,9 @@ def handle_commands(cfg, notifier, state):
                 "%s\n\nTap to change. Send /status for today's report."
                 % watching_line(active_targets(cfg, state)), menu_buttons())
 
+        elif value in ("log", "history", "notifications"):
+            notifier.report(notification_log_text(state), title="NOTIFICATION LOG")
+
         elif value == "status":
             # The same report the daily message uses, on demand.
             check = self_check(cfg, notifier, state)
@@ -388,6 +391,13 @@ def run(cfg, notifier, state, deadline):
         interval = poll_interval(cfg, now)
         trouble = False
 
+        # Everything the bot sent since the last pass, with the second it went
+        # out. Alarm buzzes delete themselves, so this is the only record of
+        # which message came first.
+        for entry in notifier.take_journal():
+            state.data.setdefault("notifications", []).append(entry)
+        del state.data.setdefault("notifications", [])[:-120]
+
         # Alarms that finished since the last pass: record how delivery went.
         for done in notifier.take_finished():
             log("alarm '%s' ended after %ds (%s), telegram=%s ntfy=%s"
@@ -441,6 +451,7 @@ def run(cfg, notifier, state, deadline):
                     % (key, took, len(states), open_dates or "none"))
 
                 handle_changes(cfg, notifier, state, tgt, states)   # months-safe
+                stop_if_gone(cfg, notifier, state, tgt, open_dates)
                 alert_openings(cfg, notifier, state, tgt, open_dates)
 
             except visasite.WrongCalendar as e:
@@ -564,6 +575,38 @@ def wait_and_listen(cfg, notifier, state, seconds):
         time.sleep(min(left, 2.0))
 
 
+def stop_if_gone(cfg, notifier, state, tgt, open_dates):
+    """Silence an alarm the instant the thing it is ringing about disappears.
+
+    A slot that opens and vanishes within a minute used to leave the phone
+    ringing for the full fifteen, long after there was anything to book. The
+    dates each alarm was raised for are remembered, so when none of them is still
+    open the ringing stops and says why.
+    """
+    key = tgt["key"]
+    was_for = (state.data.get("ringing_for") or {}).get(key) or []
+    if not was_for or key not in notifier.ringing():
+        return
+
+    still = [d for d in was_for if d in open_dates]
+    if still:
+        return
+
+    notifier.stop_ringing(key, reason="the slot disappeared")
+    state.data.get("ringing_for", {}).pop(key, None)
+    # Let it ring again if the same date genuinely re-opens later.
+    for d in was_for:
+        state.data["alerted"].pop("%s|%s" % (key, d), None)
+    state.save()
+    log("STOPPED ALARM [%s]: %s no longer open" % (key, was_for))
+    notifier.changed(
+        "%s\n\nAlarm stopped - the slot is gone.\n%s\n\nIt was open for less "
+        "than one check. If it comes back you will be rung again.\n\n%s"
+        % (tgt["headline"], "\n".join(pretty_date(d) for d in was_for),
+           visasite.CALENDAR_PAGE),
+        throttle_key="gone-%s" % key, throttle_seconds=0)
+
+
 def alert_openings(cfg, notifier, state, tgt, open_dates):
     """One alarm per calendar, listing every date that opened.
 
@@ -581,7 +624,11 @@ def alert_openings(cfg, notifier, state, tgt, open_dates):
     # representative one, and watching carries on while both are ringing.
     notifier.ring(tgt["key"], "%s slots available" % tgt["headline"], text,
                   cfg["alarm_repeat_seconds"], cfg["alarm_max_seconds"],
-                  click=visasite.CALENDAR_PAGE)
+                  click=visasite.CALENDAR_PAGE,
+                  subject="%s  %s" % (tgt["headline"],
+                                      ", ".join(pretty_date(d) for d in fresh)))
+    # Remember what this alarm is about, so it can be silenced when it is over.
+    state.data.setdefault("ringing_for", {})[tgt["key"]] = list(fresh)
     for date in fresh:
         state.data["alerted"]["%s|%s" % (tgt["key"], date)] = "open"
         state.data["found"].append({
@@ -640,6 +687,42 @@ def self_check(cfg, notifier, state):
 
 def tick(ok):
     return "OK" if ok else ("skipped" if ok is None else "FAILED")
+
+
+NOTE_ICON = {
+    "ALARM START": "\U0001F514", "ALARM REPEAT": "\U0001F501",
+    "ALARM STOP": "\U0001F515", "CHANGED": "\U0001F440",
+    "PROBLEM": "⚠", "REPORT": "\U0001F4CA",
+}
+
+
+def notification_log_text(state, limit=25):
+    """Every message the bot sent, newest last, timed to the second.
+
+    Exists because an alarm replaces its own buzz each time it rings, so after
+    the fact there is no way to tell whether the alarm or the "it is gone"
+    message came first. Now there is.
+    """
+    notes = (state.data.get("notifications") or [])[-limit:]
+    if not notes:
+        return "Nothing sent yet since the monitor last started."
+
+    lines, day = [], None
+    for n in notes:
+        tash = time.gmtime(n["t"] + TASHKENT_OFFSET)
+        d = time.strftime("%Y-%m-%d", tash)
+        if d != day:
+            day = d
+            lines.append("")
+            lines.append(pretty_date(d))
+        lines.append("%s  %s %-13s %s"
+                     % (time.strftime("%H:%M:%S", tash),
+                        NOTE_ICON.get(n["kind"], "·"), n["kind"], n["what"]))
+        if n.get("detail"):
+            lines.append("%s   %s" % (" " * 8, n["detail"]))
+    lines.append("")
+    lines.append("Times are Tashkent. Newest at the bottom.")
+    return "\n".join(lines).strip()
 
 
 def daily_report_text(cfg, state, today, check):
@@ -815,6 +898,7 @@ def main():
     notifier.tg.register_commands([
         ("watch", "Change which calendars are watched"),
         ("status", "What it is watching and today's counts"),
+        ("log", "Every notification sent, timed to the second"),
         ("stop", "Stop a ringing alarm"),
     ])
     minutes = args.minutes if args.minutes is not None else cfg["run_minutes"]
