@@ -38,7 +38,7 @@ You do not need to touch the file. In the bot:
 | send | what happens |
 | --- | --- |
 | `/watch` | shows buttons for every combination; tap one to switch |
-| `/status` | today's full report, on demand |
+| `/status` | how it is doing right now, answered in about two seconds |
 | `/log` | every notification sent, timed to the second |
 | `/stop` | stops a ringing alarm |
 
@@ -225,14 +225,14 @@ runner, or a failed alarm drill. A fault that persists repeats at most every 30
 minutes so a stuck problem cannot flood the chat, and it always appears in the
 day's report regardless.
 
-**4. 📊 DAILY REPORT** — one message a day at 21:00 Tashkent, built to be scanned
+**4. 📊 STATUS UPDATE** — only when you ask at 21:00 Tashkent, built to be scanned
 rather than read. It merges the day's activity, the problems with their times, and
 a live self-check:
 
 ```
-📊 DAILY REPORT
+📊 STATUS UPDATE
 ────────────
-17 August 2026
+23 August 2026
 
 👁 WATCHING
    Short stay - Representative or Travel Agency
@@ -266,11 +266,20 @@ The last line is the whole report in one glance. **CALENDAR CHANGES** is the
 important one over time: every state change with the time it happened, which is
 how the real release schedule gets pinned down instead of guessed.
 
-The self-check is real, not a checkbox. It reads the live site and confirms the
-calendar served is the one asked for, then sends one **silent** ntfy message and
-reads it back off the server to prove your phone channel still works. Telegram
-needs no separate test — the report arriving *is* the test. Send `/status` to get
-the same report on demand at any time.
+**There is no daily message.** It used to arrive at 21:00 whether or not anything
+had happened; `/status` answers the same question whenever you actually want it.
+
+What survives is the check that sat behind it. Once a day the monitor still reads
+the live site, confirms the calendar served is the one asked for, and sends a
+**silent** ntfy message which it then reads back off the server to prove your
+phone channel works. **It says nothing when all of that passes** — only a failure
+produces a message, because a dead ntfy channel would otherwise sit unnoticed
+until the morning it mattered. The result shows up as "daily check" in `/status`.
+
+`/status` and `/log` answer from what the loop already knows, so they come back in
+about two seconds rather than ten. Both send a "⏳ Checking…" placeholder
+immediately, then edit it in place into the answer — so nothing looks dead while
+it works.
 
 Once a week a louder drill fires a genuine repeating alarm on both channels, since
 that is the only thing that proves the alarm actually rings. Passing is not news:

@@ -106,6 +106,29 @@ class Telegram:
         except Exception:
             return False
 
+    def edit(self, message_id, text, buttons=None):
+        """Replace a message in place. Used to turn a placeholder into the answer."""
+        if not message_id:
+            return False
+        params = {"chat_id": self.chat_id, "message_id": message_id, "text": text,
+                  "disable_web_page_preview": "true"}
+        if buttons:
+            params["reply_markup"] = json.dumps({"inline_keyboard": buttons})
+        try:
+            _, body = self._call("editMessageText", params)
+            return bool(body.get("ok"))
+        except Exception:
+            return False
+
+    def typing(self):
+        """The native 'typing...' hint, so a slow answer does not look dead."""
+        try:
+            self._call("sendChatAction", {"chat_id": self.chat_id, "action": "typing"},
+                       timeout=8)
+            return True
+        except Exception:
+            return False
+
     def delete(self, message_id):
         """Best effort. A message that will not delete is left alone, never fatal."""
         if not message_id:
@@ -306,6 +329,27 @@ class Notifier:
         self._last_sent[throttle_key] = time.time()
         return self._typed("\U0001F440", "CALENDAR CHANGED", body,
                            journal_as="CHANGED")
+
+    def working(self, what="Working on it"):
+        """A placeholder sent at once, later edited into the real answer.
+
+        The typing hint goes out on its own thread: it is a network round trip of
+        its own, and waiting for it delayed the very message meant to say "I have
+        started".
+        """
+        threading.Thread(target=self.tg.typing, daemon=True).start()
+        return self.tg.send("\u23f3 %s\u2026" % what, tries=1)
+
+    def replace(self, message_id, icon, kind, body, journal_as=None):
+        """Turn a placeholder into a finished message, in place."""
+        text = "%s %s\n%s\n%s" % (icon, kind, self.RULE, body.strip())
+        ok = self.tg.edit(message_id, text)
+        if not ok:                       # editing failed; send it normally instead
+            return self._typed(icon, kind, body, journal_as=journal_as)
+        self.log("telegram %s (edited in place)" % kind.lower())
+        if journal_as:
+            self.note(journal_as, _summarise(body))
+        return Delivery(True, "edited %s" % message_id, message_id)
 
     def menu(self, body, buttons):
         """Only ever shown because you asked for it."""

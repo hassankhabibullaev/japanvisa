@@ -313,17 +313,20 @@ def handle_commands(cfg, notifier, state):
                 % watching_line(active_targets(cfg, state)), menu_buttons())
 
         elif value in ("log", "history", "notifications"):
-            notifier.report(notification_log_text(state), title="NOTIFICATION LOG")
+            placeholder = notifier.working("Fetching the notification log")
+            notifier.replace(placeholder.ident, notifier.REPORT, "NOTIFICATION LOG",
+                             notification_log_text(state), journal_as="REPORT")
 
         elif value == "status":
-            # The same report the daily message uses, on demand.
-            check = self_check(cfg, notifier, state)
-            notifier.report(
-                daily_report_text(cfg, state, state.data.get("date") or
-                                  time.strftime("%Y-%m-%d",
-                                                time.gmtime(time.time() + TASHKENT_OFFSET)),
-                                  check),
-                title="REPORT - TODAY SO FAR")
+            # Answered from what the loop already knows. It re-read the calendar
+            # seconds ago, so going back to the site here only added ten seconds
+            # of silence to a question that was already answered.
+            placeholder = notifier.working("Checking")
+            today = state.data.get("date") or time.strftime(
+                "%Y-%m-%d", time.gmtime(time.time() + TASHKENT_OFFSET))
+            notifier.replace(placeholder.ident, notifier.REPORT, "STATUS UPDATE",
+                             daily_report_text(cfg, state, today, None),
+                             journal_as="REPORT")
 
     return changed
 
@@ -437,6 +440,7 @@ def run(cfg, notifier, state, deadline):
                 states, unknown = payload
                 state.data["checks"] += 1
                 last_success = time.time()
+                state.data["last_read_at"] = last_success
 
                 if unknown:
                     notifier.attention(
@@ -719,16 +723,45 @@ def alert_openings(cfg, notifier, state, tgt, open_dates):
 
 
 def maybe_daily_report(cfg, notifier, state):
+    """Once a day, prove the whole chain still works -- and say nothing if it does.
+
+    The daily report itself is off: it arrived whether or not anything had
+    happened, and /status answers the same question on demand. What remains is
+    the check behind it, because a dead ntfy channel or a calendar that stopped
+    switching would otherwise sit unnoticed until the morning it mattered. Only a
+    failure now produces a message.
+    """
+    hour = cfg.get("daily_report_hour_tashkent")
+    if hour is None:
+        return
     tash = time.gmtime(time.time() + TASHKENT_OFFSET)
     today = time.strftime("%Y-%m-%d", tash)
-    if tash.tm_hour < cfg["daily_report_hour_tashkent"]:
+    if tash.tm_hour < hour or state.data.get("summary_sent_for") == today:
         return
-    if state.data.get("summary_sent_for") == today:
-        return
+
     check = self_check(cfg, notifier, state)
-    notifier.report(daily_report_text(cfg, state, today, check))
     state.data["summary_sent_for"] = today
+    state.data["last_health_check"] = {
+        "when": time.strftime("%d %b %H:%M", tash),
+        "ok": bool(check["site"] and check["calendar"] and check["ntfy"] is not False),
+        "detail": check["detail"],
+    }
     state.save()
+
+    if cfg.get("send_daily_report"):
+        notifier.report(daily_report_text(cfg, state, today, check))
+        return
+
+    if state.data["last_health_check"]["ok"]:
+        log("daily health check passed silently: %s" % check)
+        return
+    notifier.attention(
+        "The daily health check FAILED.",
+        "site reachable   %s\nright calendar   %s\nphone alarm      %s\n\n%s\n\n"
+        "Send /status for the full picture."
+        % (tick(check["site"]), tick(check["calendar"]), tick(check["ntfy"]),
+           check["detail"] or "no further detail"),
+        throttle_key="healthcheck")
 
 
 def self_check(cfg, notifier, state):
@@ -864,20 +897,39 @@ def daily_report_text(cfg, state, today, check):
             L.append("   %s  %s%s" % (span, e["detail"], times))
     L.append("")
 
-    L.append("\U0001F9EA SELF-CHECK")
-    L.append("   site            %s" % tick(check["site"]))
-    L.append("   right calendar  %s" % tick(check["calendar"]))
-    L.append("   phone alarm     %s" % tick(check["ntfy"]))
-    L.append("   telegram        OK")
+    L.append("\U0001F9EA HEALTH")
+    last = d.get("last_read_at")
+    if last:
+        ago = int(time.time() - last)
+        fresh = "%ds ago" % ago if ago < 120 else "%d min ago" % (ago // 60)
+        L.append("   last good read  %s" % fresh)
+    if check is None:
+        # Answered from the loop's own reading rather than a fresh probe, which
+        # is why this comes back at once instead of after ten seconds.
+        L.append("   site            %s" % ("OK" if last and time.time() - last < 180
+                                            else "NOT READ RECENTLY"))
+        L.append("   telegram        OK")
+    else:
+        L.append("   site            %s" % tick(check["site"]))
+        L.append("   right calendar  %s" % tick(check["calendar"]))
+        L.append("   phone alarm     %s" % tick(check["ntfy"]))
+        L.append("   telegram        OK")
+    hc = d.get("last_health_check")
+    if hc:
+        L.append("   daily check     %s  (%s)"
+                 % ("OK" if hc.get("ok") else "FAILED", hc.get("when", "?")))
     drill = d.get("drill")
     if drill:
         L.append("   alarm drill     %s  (%s)"
                  % ("OK" if drill.get("passed") else "FAILED", drill.get("when", "?")))
-    if check["detail"]:
+    if check and check["detail"]:
         L.append("")
         L.append("   %s" % check["detail"])
 
-    healthy = check["site"] and check["calendar"] and check["ntfy"] is not False
+    if check is None:
+        healthy = bool(last) and (time.time() - last) < 180
+    else:
+        healthy = check["site"] and check["calendar"] and check["ntfy"] is not False
     L.append("")
     L.append("─" * 12)
     L.append("✅ Everything working" if healthy else "❗ Needs your attention")

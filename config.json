@@ -1,5 +1,5 @@
 {
-  "_README": "Change 'watch' to pick calendars (keys from 'targets'). Inside hot_hours_utc it checks every poll_seconds_hot across hot_months; otherwise every poll_seconds_rest. All months are swept at least every full_sweep_seconds. Times are UTC, Tashkent is UTC+5.",
+  "_README": "Change 'watch' to pick calendars (keys from 'targets'). Inside hot_hours_utc it checks every poll_seconds_hot across hot_months; otherwise every poll_seconds_rest. send_daily_report=false means the once-a-day health check runs silently and only speaks up if something is wrong; ask for a report with /status instead. Times are UTC, Tashkent is UTC+5.",
   "watch": [
     "short_stay_representative",
     "short_stay_applicant"
@@ -57,5 +57,6 @@
   "alarm_max_seconds": 900,
   "daily_report_hour_tashkent": 21,
   "run_minutes": 300,
-  "seat_probe_seconds": 15
+  "seat_probe_seconds": 15,
+  "send_daily_report": false
 }
