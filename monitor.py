@@ -70,7 +70,7 @@ class State:
         # they already had.
         self.data = {"date": None, "summary_sent_for": None, "watch_override": None,
                      "seen": {}, "alerted": {}, "notifications": [], "ringing_for": {},
-                     "seatlog": {}}
+                     "seatlog": {}, "journey": {}}
         self.data.update(dict(self.FRESH_DAY))
         self.load()
 
@@ -103,9 +103,10 @@ class State:
 
     def prune_alerted(self, today):
         """Forget dates that have already passed, so the record cannot grow forever."""
-        alerted = self.data.get("alerted") or {}
-        for k in [k for k in alerted if k.rsplit("|", 1)[-1] < today]:
-            del alerted[k]
+        for name in ("alerted", "seatlog", "journey"):
+            book = self.data.get(name) or {}
+            for k in [k for k in book if k.rsplit("|", 1)[-1] < today]:
+                del book[k]
 
     def roll_day(self, today):
         if self.data.get("date") != today:
@@ -545,10 +546,16 @@ def handle_changes(cfg, notifier, state, tgt, states):
     stamp = time.strftime("%H:%M:%S", time.gmtime(time.time() + TASHKENT_OFFSET))
     reasons = {}
     for date, was, now, wording in changes:
+        note_journey(state, tgt["key"], date, was)     # seed, if this is the first we saw
+        note_journey(state, tgt["key"], date, now)
         why = ""
         if was == visasite.Day.OPEN:
-            why = explain_loss(seat_trail(state, tgt["key"], date), now)
+            why = explain_loss(state, tgt["key"], date,
+                               seat_trail(state, tgt["key"], date), now)
             reasons[date] = why
+        verdict = settled_verdict(state, tgt["key"], date)
+        if verdict:
+            reasons[date] = (reasons.get(date) + "\n   " if reasons.get(date) else "") + verdict
         state.data.setdefault("transitions", []).append(
             {"at": stamp, "calendar": tgt["headline"], "date": date,
              "from": was, "to": now, "what": wording, "why": why})
@@ -566,8 +573,14 @@ def handle_changes(cfg, notifier, state, tgt, states):
             lines.append("%s  -  %s" % (pretty_date(d), w))
             if reasons.get(d):
                 lines.append("   %s" % reasons[d])
-        notifier.changed("%s\n\n%s\n\n%s"
-                         % (tgt["headline"], "\n".join(lines), visasite.CALENDAR_PAGE))
+            hist = journey_lines(state, tgt["key"], d)
+            if len(hist) > 1:
+                lines.append("   how it got here:")
+                lines.extend(hist)
+            lines.append("")
+        notifier.changed("%s\n\n%s\n%s"
+                         % (tgt["headline"], "\n".join(lines).strip(),
+                            visasite.CALENDAR_PAGE))
 
 
 def wait_and_listen(cfg, notifier, state, seconds):
@@ -628,27 +641,82 @@ def seat_trail(state, tgt_key, date):
     return (state.data.get("seatlog") or {}).get("%s|%s" % (tgt_key, date)) or []
 
 
-def explain_loss(trail, now_state):
-    """Say why a day stopped being bookable, from the seat readings we have.
+PLAIN_STATE = {
+    visasite.Day.OPEN: "bookable",
+    visasite.Day.FULL: "reception, no seats",
+    visasite.Day.WAITLIST: "waiting list only",
+    visasite.Day.NONE: "not on the calendar",
+}
 
-    Deliberately worded as evidence rather than a verdict where the evidence is
-    thin, because guessing wrong here is worse than saying "cannot tell".
+
+def note_journey(state, tgt_key, date, new_state):
+    """Keep each date's own history of states, with the moment of each change."""
+    j = state.data.setdefault("journey", {}).setdefault("%s|%s" % (tgt_key, date), [])
+    if j and j[-1]["state"] == new_state:
+        return j
+    j.append({"t": time.time(), "state": new_state})
+    del j[:-16]
+    return j
+
+
+def journey_lines(state, tgt_key, date):
+    j = (state.data.get("journey") or {}).get("%s|%s" % (tgt_key, date)) or []
+    return ["   %s  %s" % (notify.stamp(p["t"]), PLAIN_STATE.get(p["state"], p["state"]))
+            for p in j[-6:]]
+
+
+def explain_loss(state, tgt_key, date, trail, now_state):
+    """Say what is known about a day leaving the bookable state.
+
+    Earlier this announced "the embassy took the day off the calendar" the moment
+    a day went missing. That was wrong: on 23 August both calendars dropped
+    3 September and brought it straight back as waiting list, so "gone" was a
+    step in a reconfiguration, not the end of the story. Nothing is now concluded
+    from a single hop -- a day that vanishes is reported as vanished, and the
+    verdict waits until it settles.
     """
     seats = [p["seats"] for p in trail if p.get("seats") not in (None, -1)]
     trail_txt = " to ".join(str(x) for x in seats[-4:]) if seats else ""
 
-    if now_state == visasite.Day.NONE:
-        base = "the embassy took the day off the calendar - booking cannot make a day disappear"
-        return base + (" (seats were %s)" % trail_txt if trail_txt else "")
-
     if len(seats) >= 2 and seats[-1] < seats[0]:
         return "applicants were booking it - seats fell %s" % trail_txt
+
+    if now_state == visasite.Day.NONE:
+        return ("off the calendar for the moment%s - it may come back as a waiting "
+                "list, so this is not yet a removal"
+                % (" (it still had %s seats)" % seats[-1] if seats else ""))
+
+    if now_state == visasite.Day.WAITLIST:
+        base = "switched to waiting list"
+        if seats and seats[-1] >= 3:
+            return base + " while it still had %d seats, so it was closed rather than filled" % seats[-1]
+        return base
     if seats and seats[-1] >= 3:
-        return ("still had %d seats at the last look, so it was closed rather than filled"
-                % seats[-1])
+        return "still had %d seats at the last look, so it was closed rather than filled" % seats[-1]
     if seats and seats[-1] == 0:
         return "seats ran out - applicants took them"
-    return "no seat reading before it went, so this one cannot be told apart"
+    return "no seat reading before it went, so the cause cannot be told from here"
+
+
+def settled_verdict(state, tgt_key, date, within=600):
+    """What the whole sequence says, once a date has stopped moving.
+
+    A day that goes bookable, vanishes, then reappears as a waiting list inside a
+    few minutes was being reconfigured. Booking cannot do that; only the embassy
+    can. This is the conclusion the single-hop version got wrong.
+    """
+    j = (state.data.get("journey") or {}).get("%s|%s" % (tgt_key, date)) or []
+    if len(j) < 3:
+        return ""
+    recent = [p for p in j if time.time() - p["t"] <= within]
+    states = [p["state"] for p in recent]
+    if visasite.Day.OPEN in states and states[-1] in (visasite.Day.WAITLIST, visasite.Day.FULL):
+        if visasite.Day.NONE in states:
+            return ("it opened, dropped off the calendar and came back as %s within "
+                    "minutes - that is the embassy reconfiguring the day, not "
+                    "applicants booking it" % PLAIN_STATE[states[-1]])
+        return "it opened and went straight to %s" % PLAIN_STATE[states[-1]]
+    return ""
 
 
 def stop_if_gone(cfg, notifier, state, tgt, open_dates):
@@ -678,8 +746,9 @@ def stop_if_gone(cfg, notifier, state, tgt, open_dates):
     lines = []
     for d in was_for:
         lines.append(pretty_date(d))
-        why = explain_loss(seat_trail(state, key, d), visasite.Day.NONE
-                           if d not in open_dates else visasite.Day.OPEN)
+        why = explain_loss(state, key, d, seat_trail(state, key, d),
+                           visasite.Day.NONE if d not in open_dates
+                           else visasite.Day.OPEN)
         if why:
             lines.append("   %s" % why)
     notifier.changed(
@@ -712,6 +781,7 @@ def alert_openings(cfg, notifier, state, tgt, open_dates):
     # Remember what this alarm is about, so it can be silenced when it is over.
     state.data.setdefault("ringing_for", {})[tgt["key"]] = list(fresh)
     for date in fresh:
+        note_journey(state, tgt["key"], date, visasite.Day.OPEN)
         state.data["alerted"]["%s|%s" % (tgt["key"], date)] = "open"
         state.data["found"].append({
             "calendar": tgt["headline"],
@@ -827,10 +897,14 @@ def notification_log_text(state, limit=25):
             lines.append("")
             lines.append(pretty_date(d))
         lines.append("%s  %s %-13s %s"
-                     % (time.strftime("%H:%M:%S", tash),
+                     % (notify.stamp(n["t"]),
                         NOTE_ICON.get(n["kind"], "·"), n["kind"], n["what"]))
         if n.get("detail"):
-            lines.append("%s   %s" % (" " * 8, n["detail"]))
+            lines.append("%s   %s" % (" " * 12, n["detail"]))
+        # Every buzz, with the moment it went out. The buzzes delete each other
+        # in the chat, so this is the only place the repetitions survive.
+        for i, rt in enumerate(n.get("rings") or [], 1):
+            lines.append("%s   ring %-2d %s" % (" " * 12, i, notify.stamp(rt)))
     lines.append("")
     lines.append("Times are Tashkent. Newest at the bottom.")
     return "\n".join(lines).strip()

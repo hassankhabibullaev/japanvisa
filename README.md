@@ -172,9 +172,39 @@ whether the alarm or the "it is gone" message came first. `/log` answers that:
            2 rings, ended by the slot disappeared
 ```
 
+### Every message is stamped to the millisecond
+
+Telegram shows only the hour and minute beside a message, which cannot separate
+two events seconds apart. Every message ends with its own exact time:
+
+```
+🕐 23 Aug 19:11:38.563
+```
+
+Alarm buzzes carry a ring number as well, and because each buzz deletes the one
+before it, `/log` keeps the full list of ring times afterwards.
+
 ### Taken by applicants, or pulled by the embassy?
 
-When a day stops being bookable the message now says which, and on what grounds:
+When a day stops being bookable the message says which, and on what grounds. It
+does **not** conclude from a single change: on 23 August both calendars dropped
+3 September and brought it straight back as a waiting list, so "gone" turned out
+to be a step in a reconfiguration rather than a removal. Each date keeps its own
+timeline, and the verdict waits until it settles:
+
+```
+3 September 2026  -  waiting list opened (no seats to book)
+   it opened, dropped off the calendar and came back as waiting list only
+   within minutes - that is the embassy reconfiguring the day, not applicants
+   booking it
+   how it got here:
+   19:11:37.754  not on the calendar
+   19:11:37.754  bookable
+   19:11:38.156  not on the calendar
+   19:11:38.563  waiting list only
+```
+
+The evidence for the older wording is below.
 
 ```
 👀 CALENDAR CHANGED

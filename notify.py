@@ -19,6 +19,25 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+TASHKENT = 5 * 3600
+
+
+def stamp(t=None):
+    """Tashkent wall-clock to the millisecond.
+
+    Telegram only shows the hour and minute against a message, which is useless
+    for telling two events seconds apart. Every message carries its own.
+    """
+    t = time.time() if t is None else t
+    g = time.gmtime(t + TASHKENT)
+    return "%s.%03d" % (time.strftime("%H:%M:%S", g), int((t % 1) * 1000))
+
+
+def datestamp(t=None):
+    t = time.time() if t is None else t
+    return time.strftime("%d %b", time.gmtime(t + TASHKENT))
+
+
 TG_API = "https://api.telegram.org/bot%s/%s"
 NTFY = "https://ntfy.sh"
 UA = "japanvisa-monitor"
@@ -289,7 +308,9 @@ class Notifier:
         return out
 
     def _typed(self, icon, kind, body, buttons=None, journal_as=None):
-        text = "%s %s\n%s\n%s" % (icon, kind, self.RULE, body.strip())
+        now = time.time()
+        text = "%s %s\n%s\n%s\n\n\U0001F551 %s %s" % (
+            icon, kind, self.RULE, body.strip(), datestamp(now), stamp(now))
         d = self.tg.send(text, buttons=buttons)
         self.log("telegram %s: %s" % (kind.lower(), d))
         if journal_as:
@@ -342,7 +363,9 @@ class Notifier:
 
     def replace(self, message_id, icon, kind, body, journal_as=None):
         """Turn a placeholder into a finished message, in place."""
-        text = "%s %s\n%s\n%s" % (icon, kind, self.RULE, body.strip())
+        now = time.time()
+        text = "%s %s\n%s\n%s\n\n\U0001F551 %s %s" % (
+            icon, kind, self.RULE, body.strip(), datestamp(now), stamp(now))
         ok = self.tg.edit(message_id, text)
         if not ok:                       # editing failed; send it normally instead
             return self._typed(icon, kind, body, journal_as=journal_as)
@@ -409,7 +432,8 @@ class Notifier:
                 "t": time.time(), "kind": "ALARM STOP",
                 "what": self._alarms.get(key, {}).get("subject", key),
                 "detail": "%d rings, ended by %s" % (result["rounds"],
-                                                     result["stopped_by"])})
+                                                     result["stopped_by"]),
+                "rings": result.get("rings", [])})
 
     def stop_ringing(self, key=None, reason="you"):
         """Silence one alarm, or all of them when key is None."""
@@ -448,12 +472,15 @@ class Notifier:
         buttons = [[{"text": "STOP ALARM", "callback_data": stop_data}]]
 
         previous = None      # the buzz we are about to replace
+        rings = []           # when each buzz went out, to the millisecond
 
         while time.time() - started < max_seconds:
             round_start = time.time()
             rounds += 1
+            rings.append(round_start)
             body = "%s %s\n%s\n%s" % (self.ALARM, "SLOT AVAILABLE", self.RULE, text)
-            head = body if rounds == 1 else "%s\n\n(ringing - %d)" % (body, rounds)
+            head = "%s\n\n\U0001F551 %s %s   ring %d" % (
+                body, datestamp(round_start), stamp(round_start), rounds)
 
             d = self.tg.send(head, buttons=buttons, tries=1 if rounds > 1 else 3)
             tg_ok = tg_ok or d.ok
@@ -488,19 +515,23 @@ class Notifier:
                     break
                 if stop_event is not None and stop_event.wait(0.3):
                     return self._alarm_result(started, rounds, tg_ok, ntfy_ok,
-                                              problems, "you")
+                                              problems, "you", rings)
                 if stop_event is None:
                     for kind, value in self.tg.poll_replies():
                         if value in self.STOP_WORDS:
                             return self._alarm_result(started, rounds, tg_ok, ntfy_ok,
-                                                      problems, "you (%s)" % kind)
+                                                      problems, "you (%s)" % kind, rings)
                     time.sleep(0.3)
 
-        return self._alarm_result(started, rounds, tg_ok, ntfy_ok, problems, stopped_by)
+        return self._alarm_result(started, rounds, tg_ok, ntfy_ok, problems,
+                                  stopped_by, rings)
 
-    def _alarm_result(self, started, rounds, tg_ok, ntfy_ok, problems, stopped_by):
+    def _alarm_result(self, started, rounds, tg_ok, ntfy_ok, problems, stopped_by,
+                      rings=None):
         result = {
             "rounds": rounds,
+            "rings": list(rings or []),
+            "started": started,
             "seconds": int(time.time() - started),
             "telegram_confirmed": tg_ok,
             "ntfy_confirmed": ntfy_ok,
