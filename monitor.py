@@ -69,7 +69,8 @@ class State:
         # still-open days ring again at 00:00 Tashkent, waking someone for news
         # they already had.
         self.data = {"date": None, "summary_sent_for": None, "watch_override": None,
-                     "seen": {}, "alerted": {}, "notifications": [], "ringing_for": {}}
+                     "seen": {}, "alerted": {}, "notifications": [], "ringing_for": {},
+                     "seatlog": {}}
         self.data.update(dict(self.FRESH_DAY))
         self.load()
 
@@ -453,6 +454,7 @@ def run(cfg, notifier, state, deadline):
                 handle_changes(cfg, notifier, state, tgt, states)   # months-safe
                 stop_if_gone(cfg, notifier, state, tgt, open_dates)
                 alert_openings(cfg, notifier, state, tgt, open_dates)
+                probe_seats(cfg, sessions, state, tgt, open_dates)
 
             except visasite.WrongCalendar as e:
                 trouble = True
@@ -537,11 +539,17 @@ def handle_changes(cfg, notifier, state, tgt, states):
         return
 
     stamp = time.strftime("%H:%M:%S", time.gmtime(time.time() + TASHKENT_OFFSET))
+    reasons = {}
     for date, was, now, wording in changes:
+        why = ""
+        if was == visasite.Day.OPEN:
+            why = explain_loss(seat_trail(state, tgt["key"], date), now)
+            reasons[date] = why
         state.data.setdefault("transitions", []).append(
             {"at": stamp, "calendar": tgt["headline"], "date": date,
-             "from": was, "to": now, "what": wording})
-        log("CHANGE [%s] %s %s -> %s" % (tgt["key"], date, was, now))
+             "from": was, "to": now, "what": wording, "why": why})
+        log("CHANGE [%s] %s %s -> %s%s"
+            % (tgt["key"], date, was, now, "  (%s)" % why if why else ""))
     del state.data["transitions"][:-40]
     state.save()
 
@@ -549,11 +557,13 @@ def handle_changes(cfg, notifier, state, tgt, states):
     # you want quickly but should not be woken by.
     quiet = [c for c in changes if c[2] != visasite.Day.OPEN]
     if quiet:
-        notifier.changed(
-            "%s\n\n%s\n\n%s" % (tgt["headline"],
-                                "\n".join("%s  -  %s" % (pretty_date(d), w)
-                                          for d, _, _, w in quiet),
-                                visasite.CALENDAR_PAGE))
+        lines = []
+        for d, _, _, w in quiet:
+            lines.append("%s  -  %s" % (pretty_date(d), w))
+            if reasons.get(d):
+                lines.append("   %s" % reasons[d])
+        notifier.changed("%s\n\n%s\n\n%s"
+                         % (tgt["headline"], "\n".join(lines), visasite.CALENDAR_PAGE))
 
 
 def wait_and_listen(cfg, notifier, state, seconds):
@@ -573,6 +583,68 @@ def wait_and_listen(cfg, notifier, state, seconds):
             continue
         handle_commands(cfg, notifier, state)
         time.sleep(min(left, 2.0))
+
+
+def probe_seats(cfg, sessions, state, tgt, open_dates):
+    """While a day is bookable, keep a note of how many seats it has left.
+
+    Runs in the background so it never delays an alarm. The point is not the
+    number itself -- alerts do not mention seats -- but the trail it leaves. A
+    day whose seats fall 20, 14, 6 was being booked by people; a day that still
+    had twenty seats and then vanished was taken off the calendar by the embassy.
+    Without this the two are indistinguishable afterwards.
+    """
+    if not open_dates:
+        return
+    every = cfg.get("seat_probe_seconds", 15)
+    now = time.time()
+    trails = state.data.setdefault("seatlog", {})
+
+    def probe(date):
+        slot = "%s|%s" % (tgt["key"], date)
+        trail = trails.setdefault(slot, [])
+        if trail and now - trail[-1]["t"] < every:
+            return
+        try:
+            html = sessions[tgt["key"]].day(date)
+            free = [x for x in visasite.parse_day(html) if x.available]
+            seats = sum(x.seats for x in free if x.seats is not None) or None
+            if seats is None and free:
+                seats = -1                      # bookable but the site did not say
+        except Exception:
+            return                              # a failed probe is never fatal
+        trail.append({"t": now, "seats": seats})
+        del trail[:-12]
+
+    for d in open_dates[:4]:                    # a handful is plenty; stay light
+        threading.Thread(target=probe, args=(d,), daemon=True).start()
+
+
+def seat_trail(state, tgt_key, date):
+    return (state.data.get("seatlog") or {}).get("%s|%s" % (tgt_key, date)) or []
+
+
+def explain_loss(trail, now_state):
+    """Say why a day stopped being bookable, from the seat readings we have.
+
+    Deliberately worded as evidence rather than a verdict where the evidence is
+    thin, because guessing wrong here is worse than saying "cannot tell".
+    """
+    seats = [p["seats"] for p in trail if p.get("seats") not in (None, -1)]
+    trail_txt = " to ".join(str(x) for x in seats[-4:]) if seats else ""
+
+    if now_state == visasite.Day.NONE:
+        base = "the embassy took the day off the calendar - booking cannot make a day disappear"
+        return base + (" (seats were %s)" % trail_txt if trail_txt else "")
+
+    if len(seats) >= 2 and seats[-1] < seats[0]:
+        return "applicants were booking it - seats fell %s" % trail_txt
+    if seats and seats[-1] >= 3:
+        return ("still had %d seats at the last look, so it was closed rather than filled"
+                % seats[-1])
+    if seats and seats[-1] == 0:
+        return "seats ran out - applicants took them"
+    return "no seat reading before it went, so this one cannot be told apart"
 
 
 def stop_if_gone(cfg, notifier, state, tgt, open_dates):
@@ -599,11 +671,17 @@ def stop_if_gone(cfg, notifier, state, tgt, open_dates):
         state.data["alerted"].pop("%s|%s" % (key, d), None)
     state.save()
     log("STOPPED ALARM [%s]: %s no longer open" % (key, was_for))
+    lines = []
+    for d in was_for:
+        lines.append(pretty_date(d))
+        why = explain_loss(seat_trail(state, key, d), visasite.Day.NONE
+                           if d not in open_dates else visasite.Day.OPEN)
+        if why:
+            lines.append("   %s" % why)
     notifier.changed(
-        "%s\n\nAlarm stopped - the slot is gone.\n%s\n\nIt was open for less "
-        "than one check. If it comes back you will be rung again.\n\n%s"
-        % (tgt["headline"], "\n".join(pretty_date(d) for d in was_for),
-           visasite.CALENDAR_PAGE),
+        "%s\n\nAlarm stopped - the slot is gone.\n%s\n\nIf it comes back you "
+        "will be rung again.\n\n%s"
+        % (tgt["headline"], "\n".join(lines), visasite.CALENDAR_PAGE),
         throttle_key="gone-%s" % key, throttle_seconds=0)
 
 

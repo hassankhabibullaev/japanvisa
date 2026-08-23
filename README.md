@@ -172,6 +172,38 @@ whether the alarm or the "it is gone" message came first. `/log` answers that:
            2 rings, ended by the slot disappeared
 ```
 
+### Taken by applicants, or pulled by the embassy?
+
+When a day stops being bookable the message now says which, and on what grounds:
+
+```
+👀 CALENDAR CHANGED
+────────────
+REPRESENTATIVE
+
+3 September 2026  -  filled up
+   applicants were booking it - seats fell 20 to 14 to 6
+```
+
+against
+
+```
+3 September 2026  -  withdrawn
+   the embassy took the day off the calendar - booking cannot make a day
+   disappear (seats were 20 to 20 to 20)
+```
+
+Three signals separate them. The **state it lands in**: a day going to `none`
+vanished from the calendar entirely, and no amount of booking can delete a day —
+only the embassy can. The **seat trail**: while a day is open its remaining seats
+are read in the background every 15 seconds, so a day being booked leaves a
+falling trail while one that was pulled still shows a full house. And the
+**timing**: seats draining takes minutes, a withdrawal happens between two checks.
+
+The probe runs on its own thread and never delays an alarm — alerts still fire
+straight off the month grid. Where the evidence is thin it says so ("no seat
+reading before it went, so this one cannot be told apart") rather than guessing.
+
 **2. 👀 CALENDAR CHANGED** — Telegram only, no ringing. A day appearing or closing
 without ever being catchable, which is what a release taken inside a minute looks
 like afterwards. Worth knowing in seconds — there may be a leftover seat a refresh
