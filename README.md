@@ -40,6 +40,7 @@ You do not need to touch the file. In the bot:
 | `/watch` | shows buttons for every combination; tap one to switch |
 | `/status` | how it is doing right now, answered in about two seconds |
 | `/log` | every notification sent, timed to the second |
+| `/seats` | seat counts seen, with the time of each reading |
 | `/stop` | stops a ringing alarm |
 
 The choice is remembered across restarts and takes effect on the next poll, within

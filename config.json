@@ -58,5 +58,6 @@
   "daily_report_hour_tashkent": 21,
   "run_minutes": 300,
   "seat_probe_seconds": 15,
-  "send_daily_report": false
+  "send_daily_report": false,
+  "seat_probe_seconds_hot": 5
 }

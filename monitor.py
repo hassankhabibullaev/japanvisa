@@ -313,6 +313,11 @@ def handle_commands(cfg, notifier, state):
                 "%s\n\nTap to change. Send /status for today's report."
                 % watching_line(active_targets(cfg, state)), menu_buttons())
 
+        elif value in ("seats", "stock"):
+            placeholder = notifier.working("Reading the seat history")
+            notifier.replace(placeholder.ident, notifier.REPORT, "SEAT HISTORY",
+                             seat_history_text(state), journal_as="REPORT")
+
         elif value in ("log", "history", "notifications"):
             placeholder = notifier.working("Fetching the notification log")
             notifier.replace(placeholder.ident, notifier.REPORT, "NOTIFICATION LOG",
@@ -613,7 +618,10 @@ def probe_seats(cfg, sessions, state, tgt, open_dates):
     """
     if not open_dates:
         return
-    every = cfg.get("seat_probe_seconds", 15)
+    # Finer during the rush: a day can drain from ten places to one inside a
+    # single interval, and then the trail cannot say when it happened.
+    every = (cfg.get("seat_probe_seconds_hot", 5) if is_hot(cfg)
+             else cfg.get("seat_probe_seconds", 15))
     now = time.time()
     trails = state.data.setdefault("seatlog", {})
 
@@ -675,11 +683,18 @@ def explain_loss(state, tgt_key, date, trail, now_state):
     from a single hop -- a day that vanishes is reported as vanished, and the
     verdict waits until it settles.
     """
-    seats = [p["seats"] for p in trail if p.get("seats") not in (None, -1)]
+    readings = [p for p in trail if p.get("seats") not in (None, -1)]
+    seats = [p["seats"] for p in readings]
     trail_txt = " to ".join(str(x) for x in seats[-4:]) if seats else ""
 
     if len(seats) >= 2 and seats[-1] < seats[0]:
-        return "applicants were booking it - seats fell %s" % trail_txt
+        # With the times, not just the numbers: "when did it drop" is the first
+        # thing anyone asks, and a bare "10 to 1" cannot answer it.
+        return ("applicants were booking it - seats fell:\n"
+                + "\n".join("      %s   %s seat%s"
+                             % (notify.stamp(p["t"]), p["seats"],
+                                "" if p["seats"] == 1 else "s")
+                             for p in readings[-6:]))
 
     if now_state == visasite.Day.NONE:
         return ("off the calendar for the moment%s - it may come back as a waiting "
@@ -910,6 +925,31 @@ def notification_log_text(state, limit=25):
     return "\n".join(lines).strip()
 
 
+def seat_history_text(state, limit=8):
+    """Every seat reading taken, with the moment it was taken.
+
+    The counts are recorded but were never shown anywhere, so the one question
+    the trail exists to answer -- when exactly did it drop -- had no answer.
+    """
+    book = state.data.get("seatlog") or {}
+    if not book:
+        return ("No seat readings yet. Seats are only counted while a day is\n"
+                "actually bookable, which is rare and brief.")
+    out = []
+    for slot, trail in sorted(book.items()):
+        key, date = slot.rsplit("|", 1)
+        head = key.replace("short_stay_", "").replace("_", " ").upper()
+        out.append("%s  %s" % (pretty_date(date), head))
+        for p in trail[-limit:]:
+            n = p.get("seats")
+            shown = "not stated" if n in (None, -1) else "%s seat%s" % (n, "" if n == 1 else "s")
+            out.append("   %s   %s" % (notify.stamp(p["t"]), shown))
+        out.append("")
+    out.append("Times are Tashkent. A reading is taken every few seconds while a")
+    out.append("day is bookable, so a drop happened between the two times shown.")
+    return "\n".join(out).strip()
+
+
 def daily_report_text(cfg, state, today, check):
     d = state.data
     L = [pretty_date(today), ""]
@@ -1103,6 +1143,7 @@ def main():
         ("watch", "Change which calendars are watched"),
         ("status", "What it is watching and today's counts"),
         ("log", "Every notification sent, timed to the second"),
+        ("seats", "Seat counts seen, with the time of each reading"),
         ("stop", "Stop a ringing alarm"),
     ])
     minutes = args.minutes if args.minutes is not None else cfg["run_minutes"]
